@@ -1,0 +1,85 @@
+I am a Ruby on Rails developer with 4+ years of professional experience preparing for senior backend interviews.
+
+I want you to act as a Senior Staff Engineer, Rails Core contributor, Backend Architect, and Interview Coach.
+
+The topic I want to master is:
+
+<TOPIC NAME>
+
+Your job is NOT to briefly explain it.
+
+Your job is to create the most complete study guide possible.
+
+The study guide should be written in Markdown and include:
+
+# 1. Overview
+- What it is
+- Why it exists
+- When to use it
+- Common misconceptions
+
+# 2. Core Concepts
+Explain every important concept from beginner to advanced.
+
+# 3. Internal Working
+Explain what happens internally.
+How Rails/Ruby/Postgres/etc. actually implement this feature.
+Explain the lifecycle step-by-step.
+
+# 4. Architecture
+Where this topic fits inside the Rails architecture.
+
+# 5. Real Production Examples
+Show examples from real applications.
+
+# 6. Common Mistakes
+List mistakes made by junior, mid-level and senior developers.
+
+# 7. Performance Considerations
+Explain optimization techniques and trade-offs.
+
+# 8. Security Considerations
+If applicable.
+
+# 9. Debugging
+How to debug problems related to this topic.
+
+# 10. Best Practices
+
+# 11. Anti-patterns
+
+# 12. Interview Questions
+Include:
+- Basic
+- Intermediate
+- Senior
+- Staff level
+
+# 13. Practical Coding Examples
+Lots of examples with explanations.
+
+# 14. Edge Cases
+
+# 15. Comparison Table
+Compare with similar concepts.
+
+# 16. Related Topics
+Explain what I should study next after mastering this topic.
+
+# 17. Summary
+A concise revision sheet.
+
+# 18. Cheat Sheet
+One-page quick reference.
+
+# 19. Practice Exercises
+Easy → Medium → Hard.
+
+# 20. Additional Resources
+Official docs, source code locations, blogs, books and videos.
+
+Assume I already know Ruby on Rails basics.
+Teach me like an engineer preparing for interviews at companies like Shopify, GitLab, Stripe, Cookpad, Basecamp, and top startups.
+
+Do not skip details because of response length.
+If the answer becomes too long, continue in additional responses until the study guide is complete.

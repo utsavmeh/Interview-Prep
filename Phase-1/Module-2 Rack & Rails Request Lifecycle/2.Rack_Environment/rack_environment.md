@@ -617,6 +617,8 @@ This can cause extremely confusing bugs.
 
 A middleware that needs to inspect the body must carefully preserve the request-body semantics.
 
+To preserve the request body in Rack, middleware should rewind the input stream after reading it: env["rack.input"].rewind. This resets the stream so downstream consumers (like Rails) can read the body again. Otherwise, the body is consumed, causing bugs.
+
 This is an excellent senior-level interview topic.
 
 ---
@@ -800,7 +802,8 @@ env["HTTP_X_REQUEST_ID"]
 
 # 19. Why `HTTP_`?
 
-The convention originates from CGI.
+The convention originates from CGI. 
+**CGI stands for Common Gateway Interface. It is a standard protocol from the early web that defines how web server software can execute external programs (usually scripts) and pass request information to them via environment variables, enabling dynamic web content.**
 
 For example:
 

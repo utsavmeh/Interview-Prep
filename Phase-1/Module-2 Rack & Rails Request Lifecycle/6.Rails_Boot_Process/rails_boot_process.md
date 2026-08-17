@@ -6,9 +6,170 @@
 
 ### What it is
 
-The Rails boot process is everything needed to start a Ruby process (for example: a server, console, job worker, test runner, migration, or Rack host) and make the Rails app ready to run work. Booting prepares the app; it is not the same as handling the first HTTP request.
+Think of Rails booting like turning on a complicated machine before you can use it.
 
-A web process usually boots once and then serves many requests. A process can also boot just to run a single task (runner, migration, or job).
+1. What is "booting"?
+
+When you run:
+
+rails server
+
+Ruby starts a process, but your Rails application isn't ready yet.
+
+Rails then does a bunch of preparation:
+
+```
+Start Ruby
+   ↓
+Load required gems
+   ↓
+Load Rails
+   ↓
+Load your application
+   ↓
+Configure database, routes, logging, etc.
+   ↓
+Prepare autoloading
+   ↓
+Build the web application
+   ↓
+🚀 Ready to receive requests
+```
+
+That whole preparation is Rails booting.
+
+2. Booting ≠ handling a request
+
+This is important.
+
+Suppose you start your server:
+
+rails server
+
+Rails boots once:
+
+```
+BOOT
+ ↓
+Rails is ready
+ ↓
+Request 1
+Request 2
+Request 3
+Request 4
+...
+```
+
+It doesn't completely boot Rails for every request.
+
+That's why if booting takes 5 seconds, you don't normally wait 5 seconds for every HTTP request.
+
+3. What are all those complicated things?
+
+Let's translate them into simple language.
+
+Bundler
+
+Your Rails app uses gems like:
+
+```
+rails
+pg
+redis
+sidekiq
+devise
+```
+Bundler makes sure Rails uses the correct versions of those gems.
+
+Think:
+
+"Before starting, make sure we have exactly the tools this project expects."
+
+Engines
+
+An engine is basically a mini Rails application/plugin that can add its own code and configuration.
+
+For example, an authentication engine might add:
+
+```
+routes
+controllers
+models
+configuration
+```
+
+Rails gives these engines a chance to set themselves up during boot.
+
+Zeitwerk
+
+This is Rails' file/code loader.
+
+Imagine you have:
+
+```
+app/models/user.rb
+```
+
+and inside:
+
+```
+class User
+end
+```
+
+You don't normally need to write:
+
+require "user"
+
+Rails/Zeitwerk figures out:
+
+"They are using User, and User should come from user.rb."
+
+It also handles eager loading, where Rails loads lots of application code upfront, commonly in production.
+
+4. What does Rails configure?
+
+During boot, Rails prepares things like:
+
+```
+Database → "How do I connect to PostgreSQL?"
+Routes → "Which URL goes to which controller?"
+Logging → "Where/how do I write logs?"
+Credentials → "How do I access secrets?"
+Redis/cache → "How should caching work?"
+Active Record → "How do my Ruby models talk to the DB?"
+Active Job → "How do background jobs work?"
+Action Mailer → "How do I send emails?"
+I18n → "How do translations work?"
+```
+
+5. The simplest mental model
+
+Think of Rails boot like opening a restaurant:
+
+```
+🏢 Open restaurant
+      ↓
+👨‍🍳 Get staff ready          ← Gems
+      ↓
+🔧 Turn on equipment          ← Rails components
+      ↓
+📦 Prepare ingredients        ← Load application code
+      ↓
+📋 Prepare order system       ← Routes
+      ↓
+🛢️ Connect to suppliers      ← Database
+      ↓
+🚪 Open the doors
+      ↓
+🍔 Serve customers            ← Handle requests
+```
+
+Rails boot = preparing everything.
+
+Request handling = actually doing the work.
+
+And the tradeoff is: more preparation makes Rails powerful and flexible, but that preparation takes time and memory.
 
 ### Why it exists
 
@@ -45,927 +206,936 @@ Understanding boot helps you:
 
 ---
 
-## 2. Core Concepts
+### 1. Rails has 3 different lifecycles
 
-### Separate three lifecycles
+Think of these as three different levels:
 
-1. Process lifecycle: Ruby process starts, code loads, process exits. Some servers preload and then fork workers.
-2. Application lifecycle: Rails.application is configured, initialized, optionally eager loaded, and— in development—may reload code.
-3. Work lifecycle: Rack requests and background jobs run repeatedly inside executor/reloader boundaries.
+**Process lifecycle**
 
-A remote call during boot is a deployment dependency. A remote call during request handling is a traffic dependency. Treat them differently.
+```text
+Ruby starts → Rails loads → Ruby process stops
+```
 
-### Ruby loading
+**Application lifecycle**
 
-- require: looks in $LOAD_PATH and evaluates a feature once per process. Use it for gems, stdlib, and files that should not be reloaded.
-- require_relative: resolves relative to the current file. Rails entrypoints commonly use this.
-- load: re-evaluates a file every time; rarely needed.
-- Constant lookup is a Ruby feature. Rails uses Zeitwerk to handle autoloading, reloading, and eager loading of app constants.
+```text
+Rails starts → configuration happens → Rails becomes ready
+```
 
-Zeitwerk maps file paths to constants. For example, in an autoload root:
+**Work lifecycle**
 
-~~~ruby
-# app/services/payments/capture.rb
-module Payments
-  class Capture
-  end
+```text
+Request comes in → Rails handles it → Request finishes
+Request comes in → Rails handles it → Request finishes
+...
+```
+
+So:
+
+> **Booting Rails = preparing the application.**
+> **Handling requests/jobs = using the prepared application.** 
+
+---
+
+### 2. `require` vs Zeitwerk
+
+Ruby has `require`:
+
+```ruby
+require "something"
+```
+
+It basically means:
+
+> "Load this file/library."
+
+Rails has **Zeitwerk**, which makes loading your application code easier.
+
+For example:
+
+```text
+app/models/user.rb
+```
+
+contains:
+
+```ruby
+class User
 end
-~~~
+```
 
-A file at app/models/user.rb should define User. Do not manually require files that Zeitwerk manages — that bypasses the loader and can make reload behavior wrong.
+Zeitwerk understands:
 
-### Bundler and dependency resolution
+> `user.rb` → `User`
 
-config/boot.rb usually sets BUNDLE_GEMFILE and requires bundler/setup. Bundler reads Gemfile.lock and adjusts $LOAD_PATH so require "rails" works.
+So when Rails needs `User`, it can automatically load the file.
 
-Bundler.setup doesn't always require every gem. Bundler.require(*Rails.groups) typically requires entrypoints for groups later. Gems may provide Railties that Rails discovers; other gems may require their own files on demand.
-
-### Railties, engines, and Rails.application
-
-A Railtie is a plugin point for Rails. Framework pieces and many gems provide a Railtie. It can add configuration, paths, generators, rake tasks, middleware, and initializers.
-
-An Engine is a richer Railtie that can have app-like paths, routes, and a namespace. Rails::Application is the top-level Engine for your app. Rails collects initializers from the framework, engines, and the host application and runs them in an ordered graph.
-
-### Configuration sources
-
-| Source | Purpose | Timing |
-|---|---|---|
-| config/boot.rb | Bundler/Bootsnap | earliest |
-| config/application.rb | global defaults, selected framework components | application class evaluation |
-| config/environments/*.rb | environment overrides | before initializer execution |
-| config/initializers/*.rb | integration setup | initializer graph phase |
-| ENV / credentials / YAML | values consumed by config | process start or component-specific |
-| config.ru / server config | Rack/server behavior | entrypoint/server phase |
-
-Environment config usually wins because it's evaluated later. config.load_defaults sets framework defaults for a Rails version — it changes behavior and is not just cosmetic.
-
-### Initializers and lifecycle hooks
-
-An initializer is a named block of boot work. You can give it before: and after: dependencies. Rails orders initializers with topological sorting. Cycles are errors — don't rely on filenames for order.
-
-~~~ruby
-# config/application.rb
-module Ledger
-  class Application < Rails::Application
-    config.before_configuration do
-      # Application subclass setup.
-    end
-
-    config.before_initialize do
-      # Directly before initializer execution.
-    end
-
-    config.after_initialize do
-      # Once after Rails initialization.
-    end
-
-    config.to_prepare do
-      # Boot and every reload preparation in reloadable environments.
-    end
-  end
-end
-~~~
-
-after_initialize does not guarantee a listening socket, a worker fork, database reachability, or a first request. Don't assume external resources are ready just because after_initialize ran.
-
-### Reloading and to_prepare
-
-Zeitwerk is responsible for reloadable app code. In development, when a file changes, Rails unloads those constants before the next work boundary and sets up autoloads again. Long-lived global objects that hold reloadable classes can become stale.
-
-Use Rails.application.reloader.to_prepare for wiring that must run both at boot and after code reloads. to_prepare must be idempotent (replacement or assignment is good; appending is dangerous).
-
-### Autoloading, eager loading, and once paths
-
-Rails has two main autoloaders:
-
-- Rails.autoloaders.main: for reloadable application and engine code.
-- Rails.autoloaders.once: for autoload_once_paths — these can autoload but are not unloaded on reload.
-
-When config.eager_load = true, Rails loads eager-load paths at boot. Benefits: filename/constant validation at deploy time, no first-use load latency, and better copy-on-write memory sharing. Costs: longer boot and more memory; top-level side effects run at boot.
-
-### Rack middleware and routes
-
-Rack apps implement call(env) and return [status, headers, body]. Rails collects middleware declarations and later builds a nested callable stack around the endpoint. If you add middleware A then B, the request flows through A then B; the response flows back out the other way.
-
-Routes load during application setup. The route set provides recognition, URL generation, helpers, mounted engines, and supports reloading in development.
-
-### Executor and reloader
-
-The executor wraps application work and manages execution context like the query cache and connection behavior. The reloader decides whether changed code should be unloaded before handling work.
-
-### Spring, Bootsnap, preload, and forking
-
-- Spring keeps a development process running to make commands faster. Restart Spring when diagnosing boot changes.
-- Bootsnap caches expensive require resolution and compilation steps; it speeds boot, but does not change order.
-- Servers like Puma (with preload_app!), Unicorn, and Passenger can load code in a parent and fork workers. Code loaded before fork may be shared across workers via copy-on-write. Be careful: open DB connections, sockets, threads, and mutable globals may be incorrectly shared across forks unless reset after fork.
+**You generally don't need to manually `require` your Rails models/controllers/services.** 
 
 ---
 
-## 3. Internal Working
+### 3. Bundler
 
-### Canonical server timeline
+Your `Gemfile` says:
 
-~~~text
-shell
-  -> Ruby executes bin/rails
-  -> config/boot.rb: Bundler, optional Bootsnap
-  -> rails/commands dispatches server
-  -> server/Rack host loads config.ru or config/environment.rb
-  -> config/application.rb defines YourApp::Application
-       -> rails/all selects framework Railties
-       -> application + environment configuration evaluated
-  -> Rails.application.initialize!
-       -> ordered Railtie/engine/application initializers
-       -> autoloaders, logger, DB config, middleware, routes
-       -> eager loading if configured
-  -> Rack server binds and accepts requests
-  -> each request: executor/reloader -> middleware -> route -> endpoint
-~~~
+```text
+Rails
+Redis
+Sidekiq
+Postgres
+Devise
+...
+```
 
-Generated bin/rails is intentionally small:
+`Gemfile.lock` specifies the exact versions.
 
-~~~ruby
-#!/usr/bin/env ruby
-APP_PATH = File.expand_path("../config/application", __dir__)
-require_relative "../config/boot"
-require "rails/commands"
-~~~
+**Bundler makes sure your application uses those gems and versions.**
 
-A typical boot file looks like:
-
-~~~ruby
-ENV["BUNDLE_GEMFILE"] ||= File.expand_path("../Gemfile", __dir__)
-require "bundler/setup"
-require "bootsnap/setup"
-~~~
-
-Bundler makes gems loadable first. Then an app-aware command loads the Rails environment and initializes the application.
-
-### Application creation and framework selection
-
-~~~ruby
-require_relative "boot"
-require "rails/all"
-
-Bundler.require(*Rails.groups)
-
-module Ledger
-  class Application < Rails::Application
-    config.load_defaults 7.2
-    config.autoload_lib(ignore: %w[assets tasks])
-  end
-end
-~~~
-
-rails/all loads the standard framework Railties. You can load a smaller set of components if you only need some parts:
-
-~~~ruby
-require "rails"
-require "active_model/railtie"
-require "active_job/railtie"
-require "active_record/railtie"
-require "action_controller/railtie"
-require "action_mailer/railtie"
-~~~
-
-When the Application subclass runs, Rails records configuration and paths. Rails.application is a singleton. Rails.env normally comes from RAILS_ENV, then RACK_ENV, otherwise defaults to "development".
-
-### Initializer graph mechanics
-
-Railties expose initializer(name, options, &block). Rails gathers initializers from all contributors, builds a dependency graph with TSort, and runs them in a valid order.
-
-~~~ruby
-module Ledger
-  class Railtie < Rails::Railtie
-    initializer "ledger.configure", after: "active_record.initialize_database" do |app|
-      Ledger.configure(app.config.x.ledger)
-    end
-
-    initializer "ledger.middleware", before: "build_middleware_stack" do |app|
-      app.middleware.insert_before 0, Ledger::RequestId
-    end
-  end
-end
-~~~
-
-Anchor names (like "build_middleware_stack") can change between Rails releases. Inspect the framework version before binding to internal names. Prefer public config hooks when possible.
-
-Useful phases:
-
-1. Bootstrap: set load paths and basic Active Support/logging/config.
-2. Railtie and Engine configuration: components add paths and register behavior.
-3. Application initialization: config/initializers and engine contributions run in the correct graph phase.
-4. Finish: routes and middleware are finalized; after_initialize and eager loading run at their configured phases.
-
-Don't try to memorize every initializer name. Explain how ordering and ownership work, and how you would inspect the specific Rails version.
-
-### Zeitwerk internals
-
-Zeitwerk scans loader roots, maps paths to constants, and registers autoloads. Accessing Payments::Capture causes Zeitwerk to require the file it expects. Rails uses a reloadable main loader and an optional once loader.
-
-Eager loading asks every loader to require eligible files. If a file does not match its constant name (for example app/clients/stripe_client.rb defines StripeAPI), eager loading will raise a Zeitwerk::NameError. Use zeitwerk:check in CI to catch these problems.
-
-### PostgreSQL and Active Record
-
-Active Record's Railtie reads database config and sets up connection pool handling. Boot does not always open a PostgreSQL connection — checkout is usually lazy and happens when a thread needs a connection.
-
-When a connection is created, the pg gem handles authentication/TLS; Active Record wraps connections and pools them. With multiple roles, replicas, or shards, this becomes more complex.
-
-Danger: running a DB query (like User.count) in an initializer can cause many processes to open DB connections during a rolling deploy and exhaust max_connections. Avoid queries during boot when possible.
-
-### Middleware/server handoff
-
-Rails collects middleware declarations while configuring. Later it builds and instantiates the middleware stack around the endpoint. The Rack handler binds a socket and calls the assembled Rack app per request.
-
-### Entrypoint variants
-
-| Entrypoint | Difference |
-|---|---|
-| bin/rails server | Initializes then starts Rack server; server may preload/fork. |
-| config.ru/rackup | Rack host requires environment and runs Rails.application; no bin/rails dispatch necessarily. |
-| bin/rails console | Initializes then enters console; no active web request file watcher. |
-| bin/rails runner | Initializes, runs code, exits; good as a boot smoke test. |
-| Rails/Rake task | Loads tasks/app as needed; config.rake_eager_load matters. |
-| Sidekiq/worker | Requires Rails env, then runs a worker loop and job lifecycle. |
-| test | Boots test environment; may not eager load unless CI config enforces it. |
+That's basically its job. 
 
 ---
 
-## 4. Architecture
+### 4. Railties and Engines
 
-~~~mermaid
-flowchart TD
-  A["OS process / entrypoint"] --> B["Ruby + Bundler + optional Bootsnap"]
-  B --> C["Rails command or Rack host"]
-  C --> D["Application class + framework Railties"]
-  D --> E["Application, environment, engine configuration"]
-  E --> F["Initializer dependency graph"]
-  F --> G["Autoloaders / middleware / routes / integrations"]
-  G --> H{"eager_load?"}
-  H -- yes --> I["Zeitwerk eager load"]
-  H -- no --> J["On-demand autoloading"]
-  I --> K["Server / job / console runtime"]
-  J --> K
-  K --> L["Executor + reloader boundary"]
-  L --> M["Rack middleware -> routes -> controller/job"]
-~~~
+These are basically **ways to plug things into Rails**.
 
-Rails connects Ruby code loading and runtime to the Rack HTTP interface. Railties are how code plugs into Rails; middleware composes the HTTP path outwards. Engines add paths and behavior to the host app.
+A gem can tell Rails:
+
+> "During boot, please add my configuration/middleware/routes/etc."
+
+That's what a **Railtie** helps with.
+
+An **Engine** is basically a more powerful plugin that can behave somewhat like a mini Rails application.
+
+You don't need to memorize this yet. Just remember:
+
+> **Railtie/Engine = something that can add functionality to Rails during boot.** 
 
 ---
 
-## 5. Real Production Examples
+### 5. Initializers
 
-### Production-only eager-load failure
+An initializer is simply:
 
-~~~ruby
-# app/clients/stripe_client.rb
-class StripeAPI
-end
-~~~
+> **Code that Rails runs while starting up.**
 
-This may appear to work in development if callers reference StripeAPI lazily. In production, eager loading expects StripeClient and will raise an error early. Fix the file name or the constant name, or add an inflector rule.
+For example:
 
-### Multi-tenant SaaS connection storm
+```ruby
+# config/initializers/my_service.rb
 
-If an initializer reads all tenants and each new process opens DB connections, a rolling deploy can start many processes at once and exhaust DB connections.
+MyService.configure(...)
+```
 
-Better: only boot static tenant config, and lazy-load tenant data after readiness with a bounded cache. Count pools per process and role when planning capacity.
+Rails runs these during boot.
 
-### Reloadable policy registered once
+You can also tell Rails:
 
-~~~ruby
-# Bad: config/initializers/auth.rb
-AuthGateway.policy_class = AccountPolicy
-~~~
+> "Run this after X."
 
-AccountPolicy is reloadable. After a development reload, AuthGateway might keep the old class.
+or
 
-~~~ruby
-# Good
-Rails.application.reloader.to_prepare do
-  AuthGateway.policy_class = AccountPolicy
-end
-~~~
+> "Run this before Y."
 
-Use to_prepare and make the registration replace state, not append duplicates.
-
-### Preload/fork client hazard
-
-~~~ruby
-# Bad in a preloaded parent
-PAYMENTS = Faraday.new(url: ENV.fetch("PAYMENTS_URL"))
-~~~
-
-A client opened before fork can keep sockets or threads across workers.
-
-~~~ruby
-module Payments
-  def self.client
-    @client ||= Faraday.new(url: ENV.fetch("PAYMENTS_URL"))
-  end
-
-  def self.reset!
-    @client = nil
-  end
-end
-
-# config/puma.rb; exact hook depends on server mode
-on_worker_boot { Payments.reset! }
-~~~
-
-Also use standard hooks to reset Active Record connections after fork.
-
-### Feature flags
-
-~~~ruby
-# Bad: hidden deploy-time dependency
-FeatureFlags.sync_from_remote!
-~~~
-
-Configure the feature-flag client at boot but refresh flags lazily or via a controlled warmup. If your policy requires current flags before serving traffic, make that a clear readiness requirement with deadlines and fallbacks.
+Rails figures out the correct order. 
 
 ---
 
-## 6. Common Mistakes
+### 6. Eager loading vs Autoloading
 
-### Junior
+This is important.
 
-- Running DB queries or remote I/O in an initializer.
-- Requiring an autoloadable app file to fix a missing constant.
-- Scattering Rails.env checks around initializers instead of using environment config.
-- Depending on alphabetic ordering of initializer filenames.
-- Storing secrets in code or logging environment values.
+**Autoloading:**
 
-### Mid-level
+> "I'll load this code when I actually need it."
 
-- Keeping reloadable class objects in long-lived global registries.
-- Adding all of lib to autoload/eager-load paths without ignoring task and generator files.
-- Turning off production eager loading to make boot faster.
-- Inserting middleware without checking the real stack order.
-- Setting DB pool size based on machine-wide concurrency instead of per-process needs.
-- Calling Rails.application.initialize! manually from scripts.
+**Eager loading:**
 
-### Senior
+> "Load everything now during boot."
 
-- Treating private Rails or gem initializer names as stable public APIs.
-- Preloading code that leaves sockets, DB connections, threads, or mutable singletons open across fork.
-- Making boot depend on third-party services without timeouts, fallbacks, and alerts.
-- Building global registries that require a full restart to update.
-- Putting expensive allocations or side effects in eager-loaded files.
+Example:
 
-### Staff-level blind spot
+```text
+Autoloading:
+Boot → 2 seconds
+Request → needs User → load User
 
-Treating startup as only a developer concern. Startup time, memory, connection fan-out, crash loops, and external dependency policies affect deploy speed, autoscaling, and incident behavior.
+Eager loading:
+Boot → load User, Order, Payment, etc.
+Request → everything is already loaded
+```
+
+Production commonly uses eager loading.
+
+It makes the first request faster and can catch naming problems during startup, but **boot takes longer and uses more memory**. 
 
 ---
 
-## 7. Performance Considerations
+### 7. Middleware
 
-### Measure
+Think of middleware as **security/checkpoints before your request reaches Rails**.
 
-Track these metrics:
+```text
+Browser
+   ↓
+Middleware
+   ↓
+Middleware
+   ↓
+Rails Controller
+   ↓
+Response
+```
 
-- Time from process start to ready-to-serve.
-- Duration of slow initializers.
-- Memory before and after eager load and after fork.
-- Connection counts made during boot.
-- Boot/restart failure rate.
-- First-request latency vs. startup cost.
+For example, middleware can deal with things like sessions, cookies, logging, etc.
 
-A quick baseline is: time bin/rails runner 'puts :ok'. But measure with the real production image, filesystem, environment, and fork mode.
-
-### Levers
-
-| Lever | Benefit | Trade-off |
-|---|---|---|
-| Bootsnap | Faster require lookups and compilation cache | Cache troubleshooting; extra deploy storage to measure. |
-| Eager load | No first-use loading, deploy-time validation, CoW-friendly | Longer boot and more memory; top-level side effects run at boot. |
-| preload + fork | Shares immutable pages across workers | You must reset connections/clients/threads after fork. |
-| add_autoload_paths_to_load_path = false | Fewer Ruby lookups and Bootsnap indexes | Must follow Zeitwerk and avoid requiring app files. |
-| Slim framework selection | Less code and middleware | You take on integration of omitted parts. |
-| Lazy clients/caches | Faster, less fragile boot | First-use latency and still needs failure handling. |
-| Background warmup | Move noncritical work off the critical path | Can stampede dependencies; readiness must be clear. |
-
-### Copy-on-write
-
-A child process after fork shares memory pages with the parent until one writes to a page. Eagerly load immutable code before fork to improve sharing. Avoid per-worker mutations of global hashes or memoized registries that reduce sharing.
-
-### Avoid boot I/O
-
-Network calls add DNS, TLS, rate limits, and credential dependency to the deploy path. If you can't avoid network calls at boot, use short timeouts, bounded retries with jitter, and clear fallbacks.
-
-### Pool math
-
-~~~text
-maximum possible PostgreSQL connections
-≈ web processes × pool per web process
- + job processes × pool per job process
- + migration/console/monitor/deploy headroom
-~~~
-
-Roles and shards multiply connection needs. Choose pool sizes based on concurrent DB users per process, not generic request concurrency. Rolling deploy overlap and initializer queries increase demand.
+Rails builds this middleware chain during boot. 
 
 ---
 
-## 8. Security Considerations
+### 8. The whole Rails boot process
 
-- Boot runs privileged app code. Be careful with supply-chain and gem behavior — gems run with app credentials.
-- Never log full ENV, credential objects, DB URLs, or tokens. Boot logs are widely retained.
-- Required secrets should cause a clear boot failure with a non-secret error message. Optional services should have a degraded implementation.
-- Treat environment values as untrusted input: parse and validate URLs, hosts, integers, booleans; never eval or shell-interpolate them.
-- Protect health and readiness endpoints so you don't leak topology or error internals.
-- Understand how sensitive descriptors, tokens, or clients behave across forks and during rotation.
-- Separate build-time and runtime secret needs. Don't require production credentials during asset builds or CI unless absolutely necessary.
+This is probably the **most important thing to understand** from the document:
 
----
+```text
+rails server
+     ↓
+Start Ruby
+     ↓
+Load Bundler
+     ↓
+Load Rails
+     ↓
+Load application configuration
+     ↓
+Run initializers
+     ↓
+Set up Zeitwerk
+     ↓
+Set up database configuration
+     ↓
+Set up middleware
+     ↓
+Set up routes
+     ↓
+Eager load code (if enabled)
+     ↓
+🚀 Server starts
+     ↓
+Requests come in
+```
 
-## 9. Debugging
-
-### Classify before changing things
-
-| Symptom | Likely phase | First move |
-|---|---|---|
-| cannot load such file before app boot | Bundler/load path/Bootsnap | Check Ruby/Bundler/Gemfile.lock and bundle exec; clear caches. |
-| Error in config/application.rb | config evaluation | Read the first app frame in the stack and remove premature constant or I/O. |
-| Error in config/initializers | initializer graph | Find the initializer, check ordering and I/O, and reproduce with bin/rails runner. |
-| Zeitwerk::NameError in CI/prod | eager load | Run zeitwerk:check and fix name/path or inflector issues. |
-| Works until source edit | reloader/stale class | Inspect to_prepare usage and cached class references. |
-| Pods slow/not ready | I/O/eager work/pool | Time boot phases and count connections or dependencies. |
-| rails s works, server host fails | entrypoint/preload/fork | Compare the commands, env, and server hooks. |
-
-### High-signal commands
-
-~~~bash
-bin/rails runner 'puts "booted: #{Rails.version}"'
-bin/rails zeitwerk:check
-bin/rails about
-bin/rails middleware
-bin/rails routes
-RAILS_ENV=production bin/rails runner 'puts :ok'
-bin/rails runner 'pp Rails.application.initializers.map(&:name)'
-~~~
-
-When simulating production, use safe dummy config. Don't point local CI at real production services.
-
-### Inspect from console
-
-~~~ruby
-Rails.application.config.eager_load
-Rails.application.config.autoload_paths
-Rails.application.config.eager_load_paths
-Rails.autoloaders.main.dirs
-Rails.autoloaders.once.dirs
-Rails.application.middleware.map(&:klass)
-~~~
-
-Middleware shapes differ by Rails version and installed gems; don't assume the exact shape across apps.
-
-### Time initialization
-
-~~~ruby
-# config/initializers/boot_timing.rb
-started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-
-Rails.application.config.after_initialize do
-  elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
-  Rails.logger.info(event: "rails.initialized", elapsed_seconds: elapsed.round(3))
-end
-~~~
-
-Use monotonic timing or ActiveSupport::Notifications for accurate durations. Log outcomes but not secrets.
-
-### Autoload diagnostics
-
-~~~ruby
-# temporary, noisy diagnostic
-Rails.autoloaders.log!
-
-# after Rails.logger exists
-Rails.autoloaders.logger = Rails.logger
-~~~
-
-Run zeitwerk:check to catch naming issues in CI.
-
-### Incident procedure
-
-1. Capture the full exception, the first app frame, command, versions, RAILS_ENV, server mode, and revision.
-2. Reproduce with the smallest entrypoint that matches the problem (runner for init issues, real server for preload/fork behavior).
-3. Isolate application config, suspect initializers, eager load, and worker boot using timestamps.
-4. For external failures, verify DNS, credentials, firewall, quotas, and concurrent startup from the deploy environment.
-5. Fix lifecycle ownership, add regression tests, and remove temporary diagnostics.
-
-After changing Gemfile, boot config, application config, or initializers, restart Spring/server. If you suspect a stale Bootsnap cache, clear the project-specific cache safely.
+That's the big picture. 
 
 ---
 
-## 10. Best Practices
+### 9. One important warning
 
-1. Make boot deterministic, fast, idempotent, and observable.
-2. Put global defaults in application.rb and environment overrides in environment files.
-3. Keep initializers small. Move business logic into testable objects.
-4. Avoid DB writes/queries, remote I/O, long work, background threads, and irreversible side effects in boot.
-5. Run production-like eager-load checks in CI.
-6. Follow Zeitwerk naming rules; configure inflections when needed; never require reloadable app code manually.
-7. Use to_prepare only for idempotent reload-aware wiring.
-8. Define which code owns connections/clients/threads before and after fork.
-9. Publish boot duration, memory, and connection budgets.
-10. Test with the real production server/process model, not just rails server locally.
+Try **not to do expensive things during boot**.
+
+For example, this is usually a bad idea:
+
+```ruby
+# initializer
+User.count
+```
+
+Why?
+
+Imagine you deploy **10 Rails processes**.
+
+All 10 might execute that query while starting.
+
+Similarly, don't casually call external APIs during boot:
+
+```ruby
+SomeAPI.fetch_data!
+```
+
+Now your entire application startup depends on that API being available.
+
+The document calls these **boot dependencies**. 
 
 ---
 
-## 11. Anti-patterns
+### If you remember only 5 things
 
-### Initializer junk drawer
+```text
+1. Rails boot = preparing the application.
 
-~~~ruby
+2. Bundler = makes the correct gems available.
+
+3. Zeitwerk = automatically loads your Rails code.
+
+4. Initializers = code Rails runs during startup.
+
+5. Eager loading = load lots of application code during startup.
+```
+
+And the overall mental model:
+
+**`Ruby starts → Rails prepares everything → Rails becomes ready → requests/jobs happen.`**
+
+That's enough foundation before going deeper into the Rails boot process.
+
+
+# Rails Boot Process — Advanced Concepts Simplified
+
+## 1. Best Practices
+
+The main goal of Rails boot should be:
+
+> **Fast + predictable + safe + easy to debug**
+
+### Do:
+
+```
+- Keep initializers small.
+- Keep configuration in `application.rb` and environment files.
+- Follow Zeitwerk naming conventions.
+- Test eager loading in CI.
+- Make reload-related setup idempotent.
+- Keep track of boot time, memory, and DB connections.
+```
+
+### Avoid during boot:
+
+```
+❌ Database queries
+❌ Database writes
+❌ API/network calls
+❌ Long-running work
+❌ Starting background threads
+❌ Unnecessary side effects
+```
+
+Why?
+
+Because **every Rails process has to do this work before it becomes ready.**
+
+---
+
+# 2. Bad Initializer
+
+Avoid putting everything into an initializer:
+
+```ruby
 # config/initializers/setup_everything.rb
+
 User.find_each { |u| SearchIndex.sync(u) }
+
 Faraday.get(ENV.fetch("CONFIG_URL"))
+
 Thread.new { loop { Metrics.flush } }
-~~~
+```
 
-Putting this kind of work in an initializer forces every command to need DB and vendor availability, repeats work on every boot, and creates unclear thread/fork/shutdown behavior. Use migrations, background jobs, or deploy tasks instead.
+This means:
 
-### Top-level side effects in autoloaded code
+```text
+Rails starts
+   ↓
+Query database
+   ↓
+Call external API
+   ↓
+Start thread
+   ↓
+Finally finish booting
+```
 
-~~~ruby
+That's bad.
+
+Instead:
+
+```text
+Database work → migration/job
+API work      → lazy/background work
+Long work     → background job
+Threads       → explicit lifecycle management
+```
+
+---
+
+# 3. Don't Put Work at the Top of a File
+
+Avoid:
+
+```ruby
 # app/services/rates.rb
+
 Rates.refresh!
-class Rates; end
-~~~
 
-Top-level code runs when a file autoloads, eager loads, or reloads. File evaluation is not a lifecycle hook and eager-load order is not guaranteed.
+class Rates
+end
+```
 
-### Filename ordering
+Why?
 
-Files named 01_config.rb and 99_patch.rb hide ordering dependencies. Prefer a public config API or a named dependency graph.
+That code runs whenever Rails loads the file.
 
-### Global singleton with hidden lifecycle
+It could happen during:
 
-~~~ruby
-CLIENT = Vendor::Client.new(token: Rails.application.credentials.vendor_token)
-~~~
+```text
+Boot
+Eager loading
+Reloading
+Normal autoloading
+```
 
-Such singletons are hard to rotate, test, fork, or reload. Prefer factories or injected configs with explicit reset methods.
+Instead, keep files mostly for **definitions**:
 
-### Rescuing into a half-initialized app
+```ruby
+class Rates
+  def refresh
+    # actual work
+  end
+end
+```
 
-~~~ruby
+> Defining code is fine. Automatically doing expensive work while loading the file is dangerous.
+
+---
+
+# 4. Don't Depend on Filename Order
+
+Don't do this:
+
+```text
+01_config.rb
+02_database.rb
+99_patch.rb
+```
+
+and assume Rails will always execute things in that order.
+
+Instead, explicitly tell Rails:
+
+```text
+Run this AFTER X
+Run this BEFORE Y
+```
+
+Rails can then understand the dependency.
+
+---
+
+# 5. Global Objects Can Cause Problems
+
+For example:
+
+```ruby
+CLIENT = Vendor::Client.new(...)
+```
+
+This creates one global client during boot.
+
+That can become problematic with:
+
+* Reloading
+* Testing
+* Forking
+* Rotating credentials
+* Resetting connections
+
+Prefer creating clients in a controlled way, for example lazily:
+
+```ruby
+def self.client
+  @client ||= Vendor::Client.new(...)
+end
+```
+
+---
+
+# 6. Don't Hide Boot Errors
+
+Avoid:
+
+```ruby
 begin
   CriticalService.configure!
-rescue StandardError => e
-  Rails.logger.error(e.message)
+rescue
+  Rails.logger.error(...)
 end
-~~~
+```
 
-For critical setup, fail fast. For optional setup, provide a clear degraded path and expose status. A half-initialized app serving traffic is worse than a clear boot failure.
+If the service is **required for the application to work**, let Rails fail.
+
+Better:
+
+```text
+Critical service unavailable
+        ↓
+Rails doesn't start
+        ↓
+Clear error
+        ↓
+Fix the problem
+```
+
+A half-working application can be worse than an application that clearly refuses to start.
 
 ---
 
-## 12. Interview Questions
+# 7. Important Interview Questions
 
-### Basic
+## What happens after `bin/rails server`?
 
-1. **What runs after bin/rails server?** Ruby loads boot.rb, Bundler/Bootsnap, command dispatch, app/environment, Rails.application.initialize!, then the Rack server runtime.
-2. **boot.rb vs environment.rb?** config/boot.rb sets up Bundler and caches (Bootsnap). config/environment.rb loads the application and initializes it.
-3. **What is an initializer?** A named, orderable unit of boot setup from the framework, engines, or app.
-4. **Why eager-load production?** It finds filename/constant errors early, removes first-use latency, and can improve copy-on-write memory sharing.
+Simplified:
 
-### Intermediate
-
-5. **How do engines participate?** Engines are Railties with paths and routes; their initializers join the host app's initializer graph and their paths join the loader.
-6. **Why can one-shot setup fail after development reload?** The app may have stored a class object that Rails later unloads and redefines. Use idempotent to_prepare or lazy resolution.
-7. **Does boot always connect PostgreSQL?** No. Rails sets up pool config at boot, but connections are usually checked out lazily when needed.
-8. **What does Bootsnap change?** Startup speed via cached require resolution and compilation, not lifecycle order.
-9. **How does middleware order work?** Middleware wraps the app in nested Rack callables; the outer layer sees requests first and responses last.
-
-### Senior
-
-10. **How reduce a 45-second boot?** Measure, remove blocking I/O and data work, defer noncritical clients, remove eager-load side effects, test Bootsnap/preload, and validate memory impact.
-11. **preload_app! vs eager_load?** preload_app! loads code in a parent before fork; eager_load loads constants. If you combine them, be sure to reconnect/reset resources after fork.
-12. **Production eager-load error but dev works?** Reproduce with production-like config, run zeitwerk:check, fix naming/inflector issues, and add a CI guard.
-13. **A gem needs an app class in config?** Use the gem's public API. If the app class reloads, assign idempotently in to_prepare or refer to the class by name lazily.
-
-### Staff
-
-14. **Startup strategy for 200 services?** Define a startup SLO, avoid hidden boot I/O, run eager-load checks in CI, add phased telemetry, document pre/post-fork hooks, and set clear readiness contracts and rollout plans.
-15. **Feature flags must be current at startup?** Decide the safety level first. If required, make readiness depend on a bounded warmup with fallback and monitoring. If not, allow lazy refresh.
-16. **How evolve initializer contracts across engines?** Provide public config hooks, avoid relying on private initializer names, make initialization idempotent, test host combinations, and document contracts.
+```text
+bin/rails
+   ↓
+config/boot.rb
+   ↓
+Bundler / Bootsnap
+   ↓
+Rails command
+   ↓
+Application + environment
+   ↓
+Rails initializes
+   ↓
+Middleware + routes + autoloaders
+   ↓
+Eager loading
+   ↓
+Server starts
+```
 
 ---
 
-## 13. Practical Coding Examples
+## What is `boot.rb`?
 
-### A. Declarative config plus injection
+Usually responsible for things like:
 
-~~~ruby
-# config/application.rb
-module Ledger
-  class Application < Rails::Application
-    config.load_defaults 7.2
-    config.x.reconciliation.batch_size = 500
-  end
+```text
+Bundler
+Bootsnap
+```
+
+It happens very early.
+
+---
+
+## What is `environment.rb`?
+
+It loads the Rails application and initializes it.
+
+Think:
+
+```text
+boot.rb
+→ prepare Ruby/gems
+
+environment.rb
+→ prepare Rails application
+```
+
+---
+
+## What is an initializer?
+
+A piece of code that Rails runs during startup.
+
+```ruby
+initializer "my_service.setup" do
+  # setup
 end
+```
 
-# config/environments/production.rb
-Rails.application.configure do
-  config.x.reconciliation.batch_size =
-    Integer(ENV.fetch("RECONCILIATION_BATCH_SIZE", 1_000))
-end
+---
 
-# app/services/reconciliation/run.rb
-module Reconciliation
-  class Run
-    def initialize(batch_size: Rails.configuration.x.reconciliation.batch_size)
-      @batch_size = batch_size
-    end
-  end
-end
-~~~
+## Why eager-load in production?
 
-This keeps settings declarative and testable without doing work at boot.
+Main reasons:
 
-### B. A thin internal Railtie
+```text
+✓ Find code/naming errors early
+✓ Avoid loading code on the first request
+✓ Can improve memory sharing with forked workers
+```
 
-~~~ruby
-# lib/acme/audit/railtie.rb
-module Acme
-  module Audit
-    class Railtie < Rails::Railtie
-      config.acme_audit = ActiveSupport::OrderedOptions.new
+---
 
-      initializer "acme_audit.configure", before: "load_config_initializers" do |app|
-        Acme::Audit.configure(
-          enabled: app.config.acme_audit.fetch(:enabled, true),
-          sink: app.config.acme_audit[:sink]
-        )
-      end
+# 8. Does Rails Always Connect to PostgreSQL During Boot?
 
-      initializer "acme_audit.middleware", before: "build_middleware_stack" do |app|
-        app.middleware.use Acme::Audit::RackMiddleware
-      end
-    end
-  end
-end
-~~~
+**No.**
 
-Let the integration own its setup and expose configuration. Verify any private anchor names for your Rails version.
+During boot Rails mainly prepares the database configuration and connection pool.
 
-### C. Reload-safe registration
+Actual DB connections are often created **when they are needed**.
 
-~~~ruby
-# config/initializers/serializers.rb
+For example:
+
+```ruby
+User.count
+```
+
+may cause a real DB connection to be checked out.
+
+So:
+
+```text
+Boot
+ ↓
+Prepare DB configuration
+ ↓
+Server ready
+
+Later...
+ ↓
+Request needs DB
+ ↓
+Get DB connection
+```
+
+---
+
+# 9. What is Bootsnap?
+
+Bootsnap is basically a **startup speed improvement**.
+
+It caches expensive things like:
+
+```text
+require lookup
+Ruby compilation
+```
+
+So Rails can start faster.
+
+Important:
+
+> Bootsnap changes **speed**, not the Rails boot order.
+
+---
+
+# 10. `preload_app!` vs Eager Loading
+
+These are different concepts.
+
+### Eager loading
+
+```text
+Load application classes
+```
+
+### `preload_app!`
+
+```text
+Load application
+     ↓
+Parent process
+     ↓
+Fork workers
+```
+
+Example:
+
+```text
+Parent
+  ↓
+Loads Rails
+  ↓
+Fork
+ ↙   ↘
+Worker Worker
+```
+
+Workers can share some memory with the parent.
+
+But things like:
+
+```text
+DB connections
+Sockets
+Threads
+External clients
+```
+
+may need to be reset after the fork.
+
+---
+
+# 11. Development Reloading
+
+In development, Rails can reload your application code.
+
+Example:
+
+```text
+You change user.rb
+       ↓
+Rails unloads old User
+       ↓
+Rails loads new User
+```
+
+This creates an important problem.
+
+If some global object saved the **old User class**:
+
+```ruby
+Registry.user_class = User
+```
+
+Rails may later replace `User` with a new class.
+
+Now:
+
+```text
+Registry → old User
+Rails    → new User
+```
+
+That's why reload-aware setup should often use:
+
+```ruby
 Rails.application.reloader.to_prepare do
-  ApiRenderer.register("invoice", Invoices::Serializer)
+  # setup
 end
+```
 
-# registry must replace, not append
-def self.register(name, klass)
-  @serializers ||= {}
-  @serializers[name] = klass
-end
-~~~
+And it should be **idempotent**.
 
-### D. Avoid accidental DB boot work
+Meaning:
 
-~~~ruby
-# Bad
-DEFAULT_PLAN = Plan.find_by!(slug: "starter")
-
-# Better
-class Plans::Default
-  def self.fetch
-    Plan.find_by!(slug: "starter")
-  end
-end
-~~~
-
-Store identifiers in config and create required data with migrations, seeds, or deploy orchestration. Verify with health checks rather than running queries at every boot.
-
-### E. Lazy external client
-
-~~~ruby
-module Risk
-  class Client
-    def self.instance
-      @instance ||= new(url: ENV.fetch("RISK_URL"))
-    end
-
-    def initialize(url:)
-      @connection = Faraday.new(url:) do |f|
-        f.options.open_timeout = 0.2
-        f.options.timeout = 0.5
-      end
-    end
-  end
-end
-~~~
-
-This delays socket creation until needed. Add error handling, retries, metrics, and post-fork reset logic.
-
-### F. Eager-load CI smoke test
-
-~~~ruby
-# test/integration/eager_loading_test.rb
-require "test_helper"
-
-class EagerLoadingTest < ActiveSupport::TestCase
-  test "application eager loads" do
-    Rails.application.eager_load!
-  end
-end
-~~~
-
-Or in CI:
-
-~~~bash
-RAILS_ENV=production SECRET_KEY_BASE=dummy bin/rails zeitwerk:check
-~~~
-
-Use safe dummy config values; never point CI to production services.
-
-### G. Explain middleware placement
-
-~~~ruby
-# config/application.rb
-config.middleware.insert_before Rack::Head, RequestCorrelationId
-~~~
-
-A correlation ID should be available early so downstream logs can use it and the response can return it. Validate the stack with bin/rails middleware because it varies by version and gems.
+> Running it twice should not break anything or create duplicates.
 
 ---
 
-## 14. Edge Cases
+# 12. The Most Important Architecture
 
-| Edge case | Why it surprises teams | Correct response |
-|---|---|---|
-| runner boots, server fails | socket binding or preload happens later | Test the real server command and hooks. |
-| config.ru differs from bin/rails | different host/command/env/config | Compare command args, env, and server config. |
-| console sees old code | console doesn't run a file-watcher loop | Reload or restart intentionally. |
-| Worker starts before migrations | app boots against an old schema | Coordinate releases with expand-contract migrations. |
-| STI subclasses missing in dev | lazy load cannot enumerate unknown subclasses | Eager load or preload the hierarchy with a documented pattern. |
-| Acronym only fails CI | file name vs constant name mismatch (VATReport vs VatReport) | Configure an inflector or rename and run zeitwerk:check. |
-| setup runs twice | to_prepare, reload, or tests may run init multiple times | Make setup idempotent. |
-| lib/tasks defines constants | broad lib autoload makes task files part of the loader | autoload_lib with ignores or move runtime code elsewhere. |
-| Rails.logger unavailable | logging initializes later | Move code later or use an early logger. |
-| credentials absent at build | build vs run contracts differ | Separate what needs secrets at build and at runtime. |
-| SIGTERM during slow boot | orchestrator kills before ready | Make boot fast and idempotent; avoid partial side effects. |
-| connection inherited after fork | parent opened connections pre-fork | Reset or reconnect in server worker hooks. |
-| circular initializer graph | no valid ordering | Remove coupling or create a clear phase. |
+Think about Rails boot like this:
 
----
-
-## 15. Comparison Table
-
-| Concept | When | Repeats? | Good for | Bad for |
-|---|---|---:|---|---|
-| config/boot.rb | earliest startup | once/process | Bundler/Bootsnap | model access/app config |
-| application.rb | app class evaluation | once/process | global declarative config | I/O/data work |
-| environment config | before initialization | once/process | deployment overrides | ordering side effects |
-| initializers | graph phase | normally once/process | thin global integration | jobs, remote sync, DB writes |
-| before_initialize | immediately before graph | once/process | rare positioning | normal configuration |
-| after_initialize | after graph | once/process | quick final wiring | assuming request/fork readiness |
-| to_prepare | boot + reload preparation | boot + reload | reload-aware assignment | non-idempotent work |
-| eager_load! | eager phase/manual | load cycle | validation/preload | load-order side effects |
-| require | first feature request | once/process | gems/std lib | Zeitwerk-owned app files |
-| middleware | request/response | every request | HTTP cross-cutting concerns | one-time setup |
-| migration | explicit deployment | intentional | schema/data evolution | boot setup |
+```text
+Ruby Process
+     ↓
+Bundler
+     ↓
+Rails
+     ↓
+Application Configuration
+     ↓
+Initializers
+     ↓
+Zeitwerk
+     ↓
+Middleware
+     ↓
+Routes
+     ↓
+Eager Loading
+     ↓
+Server / Worker / Console
+     ↓
+Requests / Jobs
+```
 
 ---
 
-## 16. Related Topics
+# 13. Where Should Code Go?
 
-Study next:
+A simple rule:
 
-1. Zeitwerk: roots, inflectors, ignored/collapsed paths, stale objects, eager-load tests.
-2. Rack/Rails request lifecycle: middleware, env, routes, controller dispatch, streaming.
-3. Rails configuration/credentials: defaults, custom config, 12-factor deployment.
-4. Puma and Ruby concurrency: workers vs threads, CoW, signals, graceful shutdown.
-5. Active Record connection handling: pools, roles/replicas/shards, query cache, PostgreSQL limits.
-6. Engines/Railties: clean Rails extension points.
-7. Active Support executor/reloader and thread context.
-8. Deployment engineering: readiness/liveness, rolling rollout, migrations, incident response.
-
----
-
-## 17. Summary — Revision Sheet
-
-- Boot makes a Ruby process ready to run a Rails app; it is separate from request handling.
-- Typical path: bin/rails -> config/boot.rb -> Rails command/Rack host -> application/environment -> initialize! -> middleware/routes/autoloaders -> server runtime.
-- Railties and engines add configuration and initializers that Rails runs in dependency order.
-- Put declarative settings in app/environment config; keep initializers small and side-effect-free.
-- Zeitwerk owns app code. Match file paths to constants, avoid requiring reloadable app files, and test eager loading in CI.
-- Eager load helps validation and CoW but costs time and memory. Its exact order is not guaranteed.
-- to_prepare runs at boot and after reloads. Keep it idempotent.
-- Active Record sets up pools at boot; code may still force real DB connections. Count connections during rollout planning.
-- Preload/fork is different from eager load. Reset or reconnect clients, pools, and threads after fork.
-- Startup duration, memory, connection fan-out, and dependency policies matter for reliability.
+| What you're doing           | Where it belongs                  |
+| --------------------------- | --------------------------------- |
+| Global configuration        | `application.rb`                  |
+| Environment-specific config | `config/environments/*.rb`        |
+| Rails integration setup     | Initializer / Railtie             |
+| Reload-aware setup          | `to_prepare`                      |
+| HTTP request logic          | Middleware / Controller / Service |
+| Database schema changes     | Migration                         |
+| Heavy/background work       | Background Job                    |
+| One-time deployment work    | Deploy task                       |
 
 ---
 
-## 18. Cheat Sheet — One Page
+# 14. Things You Generally DON'T Want During Boot
 
-~~~text
-ENTRYPOINT
-bin/rails -> config/boot.rb -> Rails command -> config/environment.rb
-          -> application.rb + env config -> Rails.application.initialize!
-          -> middleware/routes/autoloaders -> eager load? -> runtime
+```text
+❌ DB queries
+❌ DB writes
+❌ API calls
+❌ Long-running calculations
+❌ Starting threads
+❌ Unbounded retries
+❌ Manually requiring Zeitwerk-managed app files
+❌ Depending on eager-load order
+```
 
-PLACE CODE
-global config:       config/application.rb
-environment override: config/environments/production.rb
-global integration:  initializer / Railtie
-reload-aware wiring: Rails.application.reloader.to_prepare
-per request:         middleware/controller/service
-schema/data:         migration/job/deploy task
+---
 
-DO NOT PUT IN BOOT BY DEFAULT
-remote I/O | DB query/write | long work | threads | unbounded retries
-manual require for Zeitwerk app file | reliance on eager-load order
+# 15. Useful Commands
 
-COMMANDS
+### Check whether Rails can boot
+
+```bash
 bin/rails runner 'puts :ok'
+```
+
+### Check Zeitwerk
+
+```bash
 bin/rails zeitwerk:check
+```
+
+### See Rails information
+
+```bash
 bin/rails about
+```
+
+### See middleware
+
+```bash
 bin/rails middleware
+```
+
+### Check production boot
+
+```bash
 RAILS_ENV=production bin/rails runner 'puts :ok'
-
-RELOAD
-main-loader class objects can be unloaded/redefined in development.
-Do not retain them in a nonreloadable global; use idempotent to_prepare.
-
-FORK
-preload_app! != eager_load.
-Post-fork reset/reconnect DB, sockets, clients, threads, mutable state.
-
-INTERVIEW SOUND BITE
-Rails boot is a dependency-ordered composition phase: Bundler makes locked
-gems loadable; Railties/engines contribute config and initializers; Rails
-finalizes autoloaders, middleware and routes; production normally eager loads
-before traffic. Keep it deterministic and I/O-light; treat boot time,
-connection fan-out, and fork safety as reliability concerns.
-~~~
+```
 
 ---
 
-## 19. Practice Exercises
+# 16. Important Edge Cases
 
-### Easy
+### `runner` works but server fails
 
-1. Add after_initialize logging to a fresh app. Compare runner, console, and server process output.
-2. Run bin/rails middleware. Explain request and response direction through three layers.
-3. Create app/services/billing/tax_calculator.rb, intentionally break its defined constant, run zeitwerk:check, and repair it.
-4. Add config.x in application.rb, override it in development, and inject it into a service without doing boot work.
+Possible reason:
 
-### Medium
+```text
+Runner
+ ↓
+Rails boots
+ ↓
+Code runs
+```
 
-5. Write an internal Railtie that adds middleware and one config option. Test it in a dummy host.
-6. Demonstrate a stale reloadable class held in a global registry; repair it with idempotent to_prepare.
-7. Instrument three expensive initializers. Produce startup contribution data and eliminate nonessential I/O.
-8. Add a production-like eager-load CI job with safe dummy config.
-9. Compare full-stack and intentionally slim API app boot/middleware. Separate framework effects from gem effects.
+But server additionally has:
 
-### Hard
+```text
+Socket
+Preload
+Fork
+Server configuration
+```
 
-10. Run Puma preloaded with workers. Deliberately create a pre-fork HTTP client and DB checkout; refactor to post-fork-safe hooks and measure memory/connections.
-11. Design readiness for mandatory payment secret, optional Redis, and feature flags allowed to be stale ten minutes. Define timeouts, fallback, status, metrics, and rollout behavior.
-12. Write an RFC for a 40-second boot: measurement, SLO, dependency classification, connection math for 25% rolling rollout, changes, risks, rollback.
-13. Build a mountable engine usable by two hosts. Ensure public config, no leaking globals, reload safety, and no private Rails initializer dependency.
+So always test the **real server setup** when debugging server-specific issues.
 
 ---
 
-## 20. Additional Resources
+### Application works in development but fails in production
 
-### Official docs and source
+Often related to:
 
-- [The Rails Initialization Process](https://guides.rubyonrails.org/initialization.html) — canonical deep walkthrough.
-- [Configuring Rails Applications](https://guides.rubyonrails.org/configuring.html) — hooks, config, and defaults.
-- [Autoloading and Reloading Constants](https://guides.rubyonrails.org/autoloading_and_reloading_constants.html) — essential Zeitwerk guide.
-- [Rails Railties source](https://github.com/rails/rails/tree/main/railties/lib/rails) — use the release tag matching Gemfile.lock.
-- [Rails Initializable source](https://github.com/rails/rails/blob/main/railties/lib/rails/initializable.rb) — initializer ordering.
-- [Rails Application Bootstrap](https://github.com/rails/rails/blob/main/railties/lib/rails/application/bootstrap.rb) and [Finisher](https://github.com/rails/rails/blob/main/railties/lib/rails/application/finisher.rb) — framework bootstrap details.
-- [Zeitwerk](https://github.com/fxn/zeitwerk) — loader rules/APIs beneath Rails integration.
-- [Rack SPEC](https://github.com/rack/rack/blob/main/SPEC.rdoc).
-- [Puma documentation](https://puma.io/puma/).
-- [Bundler Gemfile guide](https://bundler.io/guides/gemfile.html).
+```text
+Eager loading
+Zeitwerk naming
+Environment configuration
+```
 
-### Books and videos
+Run:
 
-- *Crafting Rails Applications* — José Valim.
-- *Rails AntiPatterns* — Chad Pytel and Tammer Saleh. Its lifecycle lessons are useful; validate APIs against modern Rails.
-- RailsConf/RubyKaigi talks by Rails core members. Xavier Noria’s Zeitwerk/autoloading talks pair especially well with the official guide.
+```bash
+bin/rails zeitwerk:check
+```
 
-### Source-reading drill
+---
 
-At the exact Rails tag your app uses, trace:
+### Worker starts before migrations finish
 
-1. bin/rails
-2. config/boot.rb
-3. rails/commands command dispatch
-4. config/environment.rb and config/application.rb
-5. Rails::Application#initialize!
-6. Rails::Initializable and Rails::Application::Finisher
-7. your resulting middleware stack and autoloaders
+You can have:
 
-This turns memorized terms into an architecture you can reason about under interview pressure.
+```text
+New application code
+       ↓
+Old database schema
+       ↓
+💥 Error
+```
+
+That's why deployments and migrations need to be coordinated.
+
+---
+
+# 17. The Cheat Sheet
+
+```text
+ENTRYPOINT
+
+bin/rails
+   ↓
+config/boot.rb
+   ↓
+Rails command
+   ↓
+environment.rb
+   ↓
+application.rb + environment config
+   ↓
+Rails.application.initialize!
+   ↓
+middleware + routes + autoloaders
+   ↓
+eager loading?
+   ↓
+runtime
+```
+
+## Put code here
+
+```text
+Global config
+→ config/application.rb
+
+Environment config
+→ config/environments/production.rb
+
+Rails integration
+→ initializer / Railtie
+
+Reload-aware setup
+→ to_prepare
+
+Request logic
+→ middleware/controller/service
+
+Database schema/data
+→ migration/job/deploy task
+```
+
+## Don't put this in boot by default
+
+```text
+Remote API calls
+DB queries/writes
+Long work
+Threads
+Unbounded retries
+Manual require of app files
+```
+
+---
+
+# 18. Interview Sound Bite
+
+If someone asks:
+
+> **"Explain the Rails boot process."**
+
+A good short answer is:
+
+> Rails boot is the process of preparing a Ruby process to run a Rails application. Bundler makes the required gems available, Railties and engines contribute configuration and initializers, Rails sets up autoloading, middleware and routes, and production usually eager-loads application code before serving traffic. Boot should be deterministic and lightweight, so expensive DB/network work should generally be avoided.
+
+That's the level of understanding you should aim for first.
+
+```
+
+The biggest takeaway from this section is really just:
+
+**Rails boot should prepare things, not perform the application's actual work.** :contentReference[oaicite:0]{index=0}
+```

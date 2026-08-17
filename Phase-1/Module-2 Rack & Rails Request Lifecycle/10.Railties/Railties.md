@@ -1,122 +1,342 @@
-# Railties — Senior Backend Interview Study Guide
+# Railties — Beginner-Friendly Senior Rails Study Guide
 
-> **Scope:** Modern Rails (7.1–8.1 concepts). A few APIs and initializer names evolve between releases, so treat exact initializer ordering as a property of the Rails version in your `Gemfile.lock`. The architecture has been stable since Rails 3.
-
-Railties are Rails' integration and bootstrapping layer. They are the reason independently packaged frameworks such as Active Record, Action Pack, Active Job, and third-party gems can become one coherent application without a giant central bootstrap file.
+> **Scope:** Modern Rails 7.1–8.1. Some initializer names/APIs can change between versions, so always check the exact Rails version in your `Gemfile.lock`. The overall Railties architecture has been stable since Rails 3.
 
 ---
 
-## 1. Overview
+# 1. What is Railties?
 
-### What it is
+**Railties is the glue that connects Rails components and Rails gems to your application.**
 
-**Railties** is both a Rails gem (`railties`) and the subsystem that connects Rails components. Its central abstraction is `Rails::Railtie`: a class whose DSL registers work to be performed while a Rails application boots or while Rails tooling runs.
-
-The three related classes form a hierarchy:
+Rails is made of many separate parts:
 
 ```text
-Rails::Railtie       small integration hook; no routes or isolated app
-  └─ Rails::Engine   reusable mini-application; paths, routes, middleware
-       └─ Rails::Application  the host application's singleton engine
+Active Record
+Action Controller
+Action Mailer
+Active Job
+Action View
+...
 ```
 
-Rails itself is deliberately modular. `ActiveRecord::Railtie`, `ActionController::Railtie`, `ActionMailer::Railtie`, and others contribute their setup only when their libraries are loaded. A gem can do the same.
+Each part can use a **Railtie** to tell Rails:
 
-### Why it exists
+> "When Rails starts, I need you to configure or initialize me."
 
-Without Railties, each Rails app would need bespoke code to decide load order, merge configuration, configure middleware, run reloader callbacks, expose generators/tasks, and initialize every framework. Railties provide:
+The main class is:
 
-- a **declarative dependency graph** of boot steps rather than a fragile hand-written sequence;
-- a component boundary: `activerecord` can be used without `actionmailer`, and a gem can support both Rails and plain Ruby;
-- predictable integration points for configuration, reload lifecycle, command-line tooling, and Rack middleware;
-- engine composition: mounted engines behave as applications nested inside an application.
+```ruby
+Rails::Railtie
+```
 
-### When to use a Railtie
+A Railtie can:
 
-Use one in a library/gem when it must participate in Rails boot or tooling. Typical reasons:
-
-- define `config.my_gem.*` options;
-- install a Rack middleware or configure an existing framework;
-- register `config.to_prepare` reload-safe setup;
-- add rake tasks, generators, console/runner/server hooks;
-- integrate a framework extension once an application exists.
-
-Do **not** use a Railtie merely because code lives in `lib/`, or to run normal application business logic. In an application, prefer normal initializers only when boot-time integration is truly required; prefer explicit service invocation for business workflows.
-
-### Common misconceptions
-
-| Misconception | Reality |
-|---|---|
-| “Railtie means a Rails engine.” | An engine is a more capable subtype of `Rails::Railtie`; many gems only need a Railtie. |
-| “Every gem needs a Railtie.” | A framework-agnostic gem should load and work without Rails. Add a conditional integration file only when Rails hooks are needed. |
-| “Initializers run on every request.” | They run during process boot. In development, `to_prepare` runs once at boot and before reload cycles, not every request in all modes. |
-| “Initializer source order is execution order.” | Rails topologically sorts initializers from `before:`/`after:` dependencies; tie-breaking uses railtie load order. |
-| “`config.after_initialize` is after every reload.” | It is an application initialization callback. Use `config.to_prepare` for reload-aware setup. |
-| “Railties handle database query execution.” | They configure Active Record; SQL execution is handled by Active Record adapters and the database, not Railties. |
+* add configuration
+* register initializers
+* add middleware
+* add rake tasks
+* add generators
+* hook into Rails reloads
+* integrate with Rails frameworks
 
 ---
 
-## 2. Core Concepts
+## Railtie vs Engine vs Application
 
-### The `Rails::Railtie` contract
+Think of them as levels:
 
-A Railtie is a subclass registered when Ruby evaluates its class definition. It includes `Rails::Initializable`, has a configuration object, and exposes class DSL methods that store blocks for later execution.
+```text
+Rails::Railtie
+      ↓
+Basic Rails integration
+
+Rails::Engine
+      ↓
+Reusable mini Rails application
+(routes, models, controllers, views, etc.)
+
+Rails::Application
+      ↓
+Your actual Rails application
+```
+
+So:
+
+* **Railtie** → integration
+* **Engine** → mini application
+* **Application** → main application
+
+---
+
+## Why do we need Railties?
+
+Without Railties, every Rails application would need to manually decide:
+
+* what loads first;
+* when Active Record initializes;
+* when middleware is added;
+* how gems add configuration;
+* when reload callbacks run;
+* how generators/tasks are registered.
+
+Railties gives Rails a standard way to coordinate all of this.
+
+---
+
+## When should a gem use a Railtie?
+
+Use a Railtie when a gem needs to integrate with Rails.
+
+For example:
+
+```text
+MyGem
+ ├── configuration
+ ├── middleware
+ ├── Rails callbacks
+ ├── rake tasks
+ └── generators
+```
+
+Don't use a Railtie just because your code is inside `lib/`.
+
+Also, don't put normal business logic inside a Railtie.
+
+---
+
+# Common misconceptions
+
+| Misconception                                     | Reality                                                                  |
+| ------------------------------------------------- | ------------------------------------------------------------------------ |
+| Railtie = Engine                                  | Engine is a more powerful type of Railtie                                |
+| Every gem needs a Railtie                         | No. Only gems needing Rails integration                                  |
+| Initializers run on every request                 | No. They run during boot                                                 |
+| Initializer file order determines execution order | No. Rails uses dependencies such as `before`/`after`                     |
+| `after_initialize` runs after every reload        | No. Use `to_prepare` for reload-aware setup                              |
+| Railties execute SQL                              | No. Railties configure Active Record; Active Record/database execute SQL |
+
+---
+
+# 2. The `Rails::Railtie` Contract
+
+A basic Railtie looks like this:
 
 ```ruby
-# lib/acme_audit/railtie.rb
 module AcmeAudit
   class Railtie < Rails::Railtie
     config.acme_audit = ActiveSupport::OrderedOptions.new
     config.acme_audit.enabled = true
 
-    initializer "acme_audit.configure", after: "active_record.initialize_database" do |app|
+    initializer "acme_audit.configure" do |app|
       AcmeAudit.configure(
-        enabled: app.config.acme_audit.enabled,
-        logger: app.config.logger
+        enabled: app.config.acme_audit.enabled
       )
     end
   end
 end
 ```
 
-`Rails::Railtie` itself is abstract. Subclasses receive a monotonically increasing `load_index`; Rails uses it to make otherwise unordered boot behavior deterministic.
+There are two important things here:
 
-### Discovery and registration
+### Configuration
 
-Rails does not scan all installed gems for arbitrary `Railtie` constants. A gem's entrypoint must require its railtie after `Rails::Railtie` exists:
+```ruby
+config.acme_audit.enabled = true
+```
+
+This gives the application a setting.
+
+### Initializer
+
+```ruby
+initializer "acme_audit.configure"
+```
+
+This tells Rails:
+
+> "Run this setup during application boot."
+
+---
+
+# 3. How Rails Finds a Railtie
+
+Rails doesn't search every installed gem looking for Railties.
+
+The gem normally loads its Railtie itself:
 
 ```ruby
 # lib/acme_audit.rb
-require "acme_audit/version"
+
 require "acme_audit/client"
 require "acme_audit/railtie" if defined?(Rails::Railtie)
 ```
 
-Bundler requires gems in the groups returned by `Rails.groups`, commonly through `Bundler.require(*Rails.groups)` in `config/application.rb`. That requirement evaluates the entrypoint, which defines the subclass. Rails collects subclasses and their singleton instances later.
+The conditional is important.
 
-This is why require order matters. It also explains the conventional `lib/my_gem/railtie.rb` name and why a Rails integration should be optional for a library that supports non-Rails users.
+It means:
 
-### Initializers and the initializer graph
+```text
+Rails available?
+    │
+    ├── Yes → load Railtie
+    │
+    └── No  → don't load Rails integration
+```
 
-`initializer(name, opts = {}, &block)` creates a `Rails::Initializable::Initializer`. Names are graph nodes. `before:` and `after:` name edges; Rails uses `TSort` to produce a valid order and raises if there is a cycle.
+So the gem can still work as a normal Ruby library.
+
+Typically:
 
 ```ruby
-initializer "acme_audit.insert_middleware", before: "rack.runtime" do |app|
-  app.middleware.use AcmeAudit::RequestMiddleware
+Bundler.require(*Rails.groups)
+```
+
+loads the gem, which loads its entrypoint, which then loads the Railtie.
+
+So:
+
+```text
+Bundler
+  ↓
+Gem
+  ↓
+Gem entrypoint
+  ↓
+Railtie
+  ↓
+Rails registers it
+```
+
+This is why **require order matters**.
+
+---
+
+# 4. Initializers
+
+An initializer is code that Rails runs during application boot.
+
+Example:
+
+```ruby
+initializer "acme_audit.configure" do |app|
+  AcmeAudit.configure(
+    logger: app.config.logger
+  )
 end
 ```
 
-Rules that matter in interviews:
+You can also control its position:
 
-1. Give every initializer a globally distinctive, gem-prefixed name.
-2. Depend on a specific named prerequisite only if you actually need it.
-3. A dependency says *relative order*, not “the dependency's side effects are complete in every possible mode.”
-4. Missing named dependencies do not create a useful guarantee; inspect `bin/rails initializers` for your Rails version.
-5. The block normally receives the application; closures may capture state, so avoid capturing request-specific or mutable state.
+```ruby
+initializer "acme_audit.middleware",
+  after: "active_record.initialize_database" do |app|
 
-### Configuration
+  # setup
+end
+```
 
-Each railtie has `config`, a `Rails::Railtie::Configuration`, while the application has `Rails::Application::Configuration`. Configuration is accumulated before initialization and is shared/merged through the railtie collection.
+This means:
+
+```text
+Active Record initializer
+          ↓
+Acme Audit initializer
+```
+
+---
+
+## Initializers are a graph
+
+Rails doesn't simply run initializer files from top to bottom.
+
+Instead:
+
+```text
+A
+↓
+B
+↓
+C
+```
+
+If B says:
+
+```ruby
+after: "A"
+```
+
+Rails knows:
+
+```text
+A → B
+```
+
+Rails uses **TSort** to calculate a valid order.
+
+### Interview point
+
+> **Initializer execution order is based on dependency relationships, not simply source/file order.**
+
+---
+
+## Important rules
+
+### Give initializers unique names
+
+Good:
+
+```ruby
+initializer "acme_audit.configure"
+```
+
+Bad:
+
+```ruby
+initializer "configure"
+```
+
+Use the gem name as a namespace.
+
+---
+
+### Don't add unnecessary dependencies
+
+Only write:
+
+```ruby
+after: "something"
+```
+
+when your code actually depends on that ordering.
+
+---
+
+### Cycles cause boot failure
+
+For example:
+
+```text
+A after B
+B after A
+```
+
+Rails can't determine the correct order, so boot fails.
+
+---
+
+### Check the real initializer order
+
+```bash
+bin/rails initializers
+```
+
+This is especially useful when debugging Rails upgrades.
+
+---
+
+# 5. Configuration
+
+A Railtie can provide default configuration:
 
 ```ruby
 module FeatureFlags
@@ -126,66 +346,278 @@ module FeatureFlags
     config.feature_flags.namespace = "flags"
   end
 end
+```
 
-# config/application.rb (or config/environments/production.rb)
+The application can override it:
+
+```ruby
 config.feature_flags.adapter = :database
 ```
 
-`ActiveSupport::OrderedOptions` is convenient because it supports dot access, but it is mutable and misspelled readers can return `nil`. Validate required configuration in an initializer and freeze/copy the final value into your library. Prefer an explicit immutable configuration object for complex gems.
+Think:
 
-### `config.before_configuration`, `config.before_initialize`, `config.after_initialize`
+```text
+Gem defaults
+    ↓
+Application overrides
+    ↓
+Final configuration
+```
 
-These callbacks surround application initialization:
+---
 
-- `before_configuration`: early application configuration phase;
-- `before_initialize`: after configuration has been assembled, before the initializer graph runs;
-- `after_initialize`: after the graph has run.
+## `ActiveSupport::OrderedOptions`
 
-They are coarse lifecycle hooks. A named initializer is better when you require a precise relationship to another component. `after_initialize` is often too late to influence middleware or foundational framework setup.
+It allows convenient access:
 
-### `config.to_prepare` and reloadability
+```ruby
+config.feature_flags.adapter
+```
 
-`config.to_prepare` adds a block to `ActionDispatch::Reloader.to_prepare`. In development, Rails runs it once during boot and again before a reload cycle. In production (where reloading is normally disabled), it runs once at boot.
+instead of:
+
+```ruby
+config.feature_flags[:adapter]
+```
+
+But remember:
+
+* it's mutable;
+* typos can return `nil`.
+
+For complicated gems, it's better to validate configuration and copy it into your own final configuration object.
+
+---
+
+# 6. Rails Lifecycle Hooks
+
+There are several important hooks.
+
+## `before_configuration`
+
+Runs very early:
+
+```text
+Application starts
+      ↓
+before_configuration
+      ↓
+configuration continues
+```
+
+---
+
+## `before_initialize`
+
+Runs after configuration has been assembled but before the main initializer graph:
+
+```text
+Configuration
+      ↓
+before_initialize
+      ↓
+Initializers
+```
+
+---
+
+## `after_initialize`
+
+Runs after the initializer graph:
+
+```text
+Initializers
+      ↓
+after_initialize
+```
+
+These are **broad lifecycle hooks**.
+
+If you need precise ordering, prefer a named initializer:
+
+```ruby
+initializer "my_gem.setup",
+  after: "some_initializer"
+```
+
+---
+
+# 7. `config.to_prepare`
+
+This is important when working with Rails reloads.
 
 ```ruby
 config.to_prepare do
-  # Must be safe to execute repeatedly.
-  # `require_dependency` makes the constant's dependency explicit when relevant.
-  Admin::UserController.include AcmeAudit::ControllerMethods unless
-    Admin::UserController < AcmeAudit::ControllerMethods
+  # setup
 end
 ```
 
-The essential property is **idempotence**. Repeatedly calling `include`, subscribing to notifications, appending callbacks, or registering routes without a guard can accumulate behavior after each reload. More often, use `ActiveSupport.on_load` for framework extension and `Rails.application.reloader.to_prepare` for application constants.
+In development:
 
-### Load hooks (`ActiveSupport.on_load`)
+```text
+Rails boots
+   ↓
+to_prepare runs
+   ↓
+Code changes
+   ↓
+Rails reloads
+   ↓
+to_prepare runs again
+```
 
-Load hooks defer framework-specific integration until a framework component loads. This avoids eager loading and hard dependencies.
+In production, where reloading is normally disabled:
+
+```text
+Rails boots
+   ↓
+to_prepare runs once
+```
+
+---
+
+## The important rule: idempotence
+
+Your `to_prepare` code must be safe to run multiple times.
+
+For example:
+
+```ruby
+config.to_prepare do
+  Order.prepend(OrderAuditExtension) unless
+    Order < OrderAuditExtension
+end
+```
+
+The check prevents the extension from being repeatedly added.
+
+Be especially careful with:
+
+```ruby
+ActiveSupport::Notifications.subscribe(...)
+```
+
+If you subscribe every time `to_prepare` runs, you can accidentally create:
+
+```text
+1 subscriber
+2 subscribers
+3 subscribers
+4 subscribers
+...
+```
+
+after repeated reloads.
+
+---
+
+# 8. `ActiveSupport.on_load`
+
+`on_load` is useful when you want to extend a Rails framework **when it becomes available**.
+
+Example:
 
 ```ruby
 ActiveSupport.on_load(:active_record) do
-  extend AcmeAudit::ActiveRecordClassMethods
-  include AcmeAudit::ActiveRecordInstanceMethods
+  include MyGem::ModelMethods
 end
 ```
 
-The block runs in the target's context. If the target was already loaded, Active Support executes it immediately. This is generally a better extension point than assuming `ActiveRecord::Base` exists when your gem file is required.
+Instead of assuming Active Record is already loaded:
 
-### Middleware configuration
+```ruby
+ActiveRecord::Base.include MyGem::ModelMethods
+```
 
-The app owns a `Rails::Configuration::MiddlewareStackProxy` during configuration. Railties queue operations (`use`, `insert_before`, `swap`, `delete`) and Rails later builds the concrete `ActionDispatch::MiddlewareStack`.
+you say:
+
+```text
+"When Active Record loads, run this."
+```
+
+This makes your gem more flexible.
+
+### Simple difference
+
+```text
+on_load
+    ↓
+Run when a framework loads
+
+to_prepare
+    ↓
+Run when Rails prepares/reloads code
+```
+
+---
+
+# 9. Middleware
+
+Railties can modify the Rails middleware stack.
+
+Example:
 
 ```ruby
 initializer "acme_audit.middleware" do |app|
-  app.middleware.insert_after Rack::Head, AcmeAudit::RequestMiddleware
+  app.middleware.insert_after(
+    Rack::Head,
+    AcmeAudit::RequestMiddleware
+  )
 end
 ```
 
-The ordering is semantically important: request execution goes top-to-bottom; response unwinding goes bottom-to-top. Middleware is process-wide and must be thread-safe. Do not mutate the stack after it has been built and servers have started accepting requests.
+Middleware looks like:
 
-### Paths, routes, and engines
+```text
+Request
+   ↓
+Middleware A
+   ↓
+Middleware B
+   ↓
+Controller
+   ↓
+Middleware B
+   ↓
+Middleware A
+   ↓
+Response
+```
 
-An `Engine` adds paths (`app/models`, `app/controllers`, migrations, config), a route set, helpers, autoload behavior, and can define its own middleware. `Rails::Application` is the primary engine.
+Request goes:
+
+```text
+top → bottom
+```
+
+Response comes back:
+
+```text
+bottom → top
+```
+
+Therefore **middleware order matters**.
+
+It can affect:
+
+* authentication
+* logging
+* CORS
+* exception handling
+* request IDs
+* security
+
+Check the actual stack with:
+
+```bash
+bin/rails middleware
+```
+
+---
+
+# 10. Engines
+
+An Engine is essentially a reusable mini Rails application.
 
 ```ruby
 module Billing
@@ -193,149 +625,607 @@ module Billing
     isolate_namespace Billing
   end
 end
+```
 
-# Host routes
+It can contain:
+
+```text
+Billing Engine
+├── models
+├── controllers
+├── views
+├── routes
+├── migrations
+├── assets
+└── middleware
+```
+
+The host application can mount it:
+
+```ruby
 mount Billing::Engine, at: "/billing"
 ```
 
-`isolate_namespace` separates route/helper names and gives models/table names sensible engine defaults. It does not create a process, security boundary, or database boundary.
+---
 
-### Commands, rake tasks, generators, and hooks
-
-Railties can register lazy blocks for Rails environments:
+## `isolate_namespace`
 
 ```ruby
-class AcmeAudit::Railtie < Rails::Railtie
-  rake_tasks { load File.expand_path("../tasks/acme_audit.rake", __dir__) }
-  generators { require "generators/acme_audit/install/install_generator" }
+isolate_namespace Billing
+```
 
-  console do
-    puts "AcmeAudit enabled: #{AcmeAudit.config.enabled?}"
-  end
+helps keep the engine's:
 
-  runner do |app|
-    AcmeAudit.configure(logger: app.config.logger)
-  end
+* routes
+* helpers
+* controllers
+* models
+* naming
+
+separate from the host application.
+
+But:
+
+> **Namespace isolation is NOT a security boundary.**
+
+It doesn't automatically provide:
+
+* separate processes
+* separate databases
+* authorization
+* tenant isolation
+
+---
+
+# 11. Rails Tasks and Generators
+
+Railties can register:
+
+### Rake tasks
+
+```ruby
+rake_tasks do
+  load File.expand_path("../tasks/my_gem.rake", __dir__)
 end
 ```
 
-`rake_tasks`, `generators`, `console`, `runner`, and `server` register blocks; they do not immediately run them. The `rails` executable chooses which groups of blocks to invoke for the invoked command.
+### Generators
+
+```ruby
+generators do
+  require "generators/my_gem/install/install_generator"
+end
+```
+
+### Console hook
+
+```ruby
+console do
+  puts "MyGem enabled"
+end
+```
+
+### Runner hook
+
+```ruby
+runner do |app|
+  MyGem.configure(logger: app.config.logger)
+end
+```
+
+These blocks **register behavior**.
+
+They don't automatically mean the code runs immediately.
+
+The command you're executing decides which registered blocks are used.
 
 ---
 
-## 3. Internal Working
+# 12. What Happens During Rails Boot?
 
-### From `bin/rails server` to a working Rack app
+When you run:
 
-The exact source files vary slightly by Rails release, but the causal sequence is:
-
-1. **Binstub and Bundler.** `bin/rails` loads `config/boot.rb`, which configures Bundler and then loads `rails/commands`.
-2. **Command dispatch.** Railties' command infrastructure identifies `server`, loads application code as needed, and hands off to `Rails::Server`/Rack handler.
-3. **Application definition.** `config/application.rb` requires `rails/all` (or selected frameworks), defines `YourApp::Application < Rails::Application`, and applies early config. Requiring framework libraries defines their Railtie subclasses.
-4. **Gem loading.** `Bundler.require(*Rails.groups)` requires configured gems; their conditional railtie entrypoints register their subclasses.
-5. **Application singleton.** `Rails.application` resolves `Rails.app_class.instance`; the application is one engine/railtie instance.
-6. **Collect railties.** `Rails::Engine::Railties` combines ordinary `Rails::Railtie.subclasses` with engine subclasses and returns instances in deterministic order.
-7. **Build initializer collection.** Each railtie's `initializers` plus application/bootstrap/finisher initializers is collected. The application initializer chain is the backbone; framework and gem initializers attach around named stages.
-8. **Topologically sort and run.** `Rails::Initializable#run_initializers` calls `initializers.tsort_each`, then `initializer.run(*args)`. `TSort` respects `before:`/`after:` dependencies and delegates tie-breaking through load order.
-9. **Bootstrap.** Rails establishes logger, cache, notifications, load paths, reloader/autoloaders, and early configuration. Framework railties establish their integration.
-10. **Configure.** Environment config and railtie config are applied; callbacks around initialization run. Active Record, Action Mailer, Active Job, etc. install their own pieces if present.
-11. **Finisher.** Rails builds/eager-loads as configured, prepares routes, invokes `to_prepare` callbacks, builds the middleware stack, and executes `after_initialize` callbacks. Details vary by mode.
-12. **Rack endpoint.** `Rails.application`/engine now responds to `call(env)`. The server invokes it for each HTTP request; Railties are no longer in the hot request path except through things they installed.
-
-### The central data structures
-
-| Structure | Purpose | Interview-worthy implication |
-|---|---|---|
-| `Rails::Railtie.subclasses` | Ruby class descendants that registered during requires | A railtie absent from this list was not required. |
-| `load_index` | monotonically assigned upon inheritance | File/gem require order can affect ties. |
-| `Rails::Initializable::Collection` | initializer collection implementing `TSort` | Ordering is a graph problem, not source ordering. |
-| `Rails::Application::Configuration` | application settings and middleware proxy | Middleware changes are queued before materialization. |
-| `Rails::Engine::Railties` | aggregates app, engines, and regular railties | Host app and engine lifecycle are composed. |
-| `ActionDispatch::Reloader` | coordinates prepare/complete callbacks around code reload | Setup must tolerate repeated execution in development. |
-
-### How ordering works conceptually
-
-For each initializer `I`, Rails computes prerequisite initializers based on its `before` and `after` options. `TSort` visits prerequisites before `I`. If no explicit relation exists, Rails' deterministic collection/load order settles the tie. A cyclic graph (`A after B`, `B after A`) cannot be sorted and boot fails.
-
-Do not overspecify order. `after: "active_record.initialize_database"` turns an internal initializer name into a compatibility dependency. That may be valid for a gem that configures an adapter after the connection layer, but it should be documented and tested against supported Rails versions.
-
-### Autoloading, eager loading, and reload
-
-Railties coordinate the app lifecycle; **Zeitwerk** is the autoloading/eager-loading mechanism for application and engine code. Modern Rails typically maintains `main` (reloadable) and `once` (not reloadable) autoloaders.
-
-- In development, constants on reloadable paths may be removed and reloaded between requests.
-- In production, `config.eager_load = true` loads configured eager-load paths during boot, improving runtime predictability and copy-on-write friendliness with pre-fork servers.
-- A Railtie file itself is normally loaded by Ruby `require` from a gem and should not depend on reloadable application constants at file-evaluation time.
-
-Safe pattern: reference application constants within a `to_prepare` block, not in a class-body initializer that captures an old class object. For extension modules, make repeatability explicit.
-
-### Where Postgres fits (and does not fit)
-
-Railties never speak PostgreSQL directly. `ActiveRecord::Railtie` helps establish Active Record's Rails integration: loading configuration, setting executor/reloader hooks, configuring logging, migration tasks, and connection lifecycle. At runtime:
-
-```text
-Rack request
-  → Rails executor / Action Controller
-  → Active Record connection pool checks out a connection
-  → pg gem encodes query/protocol messages
-  → PostgreSQL backend parses, plans, executes
-  → pg decodes result; Active Record instantiates/casts records
-  → pool returns connection at executor completion
+```bash
+bin/rails server
 ```
 
-The Railtie impact is therefore indirect but important: a boot hook that connects too early, changes pool settings late, or bypasses executor lifecycle can create fork-safety, connection-exhaustion, reload, and observability problems.
-
-### Request/reload lifecycle
-
-In a typical development request that detects changed code:
+the simplified flow is:
 
 ```text
-file watcher reports change
- → reloader runs prepare callbacks (`config.to_prepare`)
- → unload/reload Zeitwerk-managed constants at its designated lifecycle point
- → Rails executor wraps request work (query cache, connection management, etc.)
- → middleware/controller/application run
- → executor completion callbacks clean up
+bin/rails
+    ↓
+config/boot.rb
+    ↓
+Bundler
+    ↓
+Rails commands
+    ↓
+config/application.rb
+    ↓
+Rails frameworks loaded
+    ↓
+Gems loaded
+    ↓
+Railties collected
+    ↓
+Initializers collected
+    ↓
+Initializer graph sorted
+    ↓
+Initializers executed
+    ↓
+Routes / middleware / autoloading prepared
+    ↓
+Rack application ready
 ```
 
-The precise order of unload and prepare callbacks is framework-managed and has evolved. The durable engineering rule: never cache reloadable classes or instances in long-lived Railtie/module class variables, and make prepare work idempotent.
+Let's understand the important steps.
 
 ---
 
-## 4. Architecture
+## Step 1 — `bin/rails`
 
-Railties is above individual frameworks and below the application developer's code. It is an orchestration layer, not an MVC layer.
+You run:
 
-```text
-CLI (`bin/rails`, generators, rake)
-              │
-          Railties
-  boot graph · config · engines · middleware assembly · reload hooks
-      ┌───────┼──────────┬────────────┐
- Active Record Action Pack   Active Job  Action Mailer / others
-      │             │            │
- database         Rack      queue adapter
-      └────── application domain code ────┘
-                     │
-                PostgreSQL
+```bash
+bin/rails server
 ```
 
-Architecture responsibilities:
+Rails loads:
 
-- **Rails core/framework authors:** expose stable hooks and compose framework parts.
-- **Engine authors:** package a reusable application surface, namespace it, and integrate it with hosts.
-- **Gem authors:** provide optional Rails integration without making core library behavior Rails-only.
-- **Application authors:** configure, compose, and only add boot hooks where application lifecycle requires it.
+```text
+config/boot.rb
+```
 
-An important boundary: application dependencies point downward toward domain code. A Railtie is infrastructure composition and should not become a service locator for business objects.
+which sets up Bundler and the environment needed to load Rails.
 
 ---
 
-## 5. Real Production Examples
+## Step 2 — Rails command system
 
-### A request-correlation gem
+Rails sees:
 
-An observability gem adds a request ID/log tags through middleware, exposes config, and makes no database calls during boot.
+```text
+server
+```
+
+and knows:
+
+> "The user wants to start the server."
+
+Eventually the Rails application is handed to the Rack server.
+
+---
+
+## Step 3 — `config/application.rb`
+
+Rails loads your application:
+
+```ruby
+class MyApp::Application < Rails::Application
+end
+```
+
+If you use:
+
+```ruby
+require "rails/all"
+```
+
+the Rails framework components are loaded.
+
+Their Railties become available.
+
+For example:
+
+```text
+Active Record
+    ↓
+ActiveRecord::Railtie
+
+Action Controller
+    ↓
+ActionController::Railtie
+```
+
+---
+
+## Step 4 — Gems load
+
+Rails runs something like:
+
+```ruby
+Bundler.require(*Rails.groups)
+```
+
+Your gems load.
+
+A gem may then load:
+
+```ruby
+MyGem::Railtie
+```
+
+So Rails now knows:
+
+> "This gem wants to participate in my boot process."
+
+---
+
+## Step 5 — Rails collects Railties
+
+Rails collects:
+
+* framework Railties
+* gem Railties
+* Engines
+* the application itself
+
+Conceptually:
+
+```text
+Rails Application
+      │
+      ├── ActiveRecord Railtie
+      ├── ActionController Railtie
+      ├── MyGem Railtie
+      ├── AnotherGem Railtie
+      └── Billing Engine
+```
+
+---
+
+## Step 6 — Initializers are collected
+
+Rails takes all the initializers from these components.
+
+For example:
+
+```text
+Active Record
+ ├── initialize_database
+ └── setup_connection
+
+My Gem
+ ├── configure
+ └── middleware
+
+Engine
+ └── routes
+```
+
+Rails combines them into one initializer graph.
+
+---
+
+## Step 7 — Rails sorts and executes them
+
+Rails uses:
+
+```text
+TSort
+```
+
+to determine the correct order based on:
+
+```ruby
+before:
+after:
+```
+
+Then the initializers execute.
+
+---
+
+# 13. What Railties Actually Does During Boot
+
+During boot, Rails and its Railties set up things such as:
+
+* logger
+* cache
+* notifications
+* load paths
+* autoloaders
+* reloader
+* framework integrations
+* database configuration
+* middleware
+* routes
+
+Eventually:
+
+```text
+Rails.application
+```
+
+becomes a working Rack application.
+
+At that point the server can call:
+
+```ruby
+Rails.application.call(env)
+```
+
+for HTTP requests.
+
+---
+
+# 14. The Important Internal Structures
+
+| Structure                   | Simple meaning                           |
+| --------------------------- | ---------------------------------------- |
+| `Rails::Railtie.subclasses` | Railties Rails knows about               |
+| `load_index`                | Helps keep Railtie loading deterministic |
+| Initializer collection      | Stores all initializers                  |
+| `TSort`                     | Calculates initializer order             |
+| Application configuration   | Stores application settings              |
+| Middleware proxy            | Collects middleware changes              |
+| `Rails::Engine::Railties`   | Combines app, engines, and Railties      |
+| `ActionDispatch::Reloader`  | Helps coordinate reload callbacks        |
+
+### Useful interview point
+
+If a Railtie doesn't appear among the registered Railties, a likely problem is:
+
+> **Its file was never required.**
+
+---
+
+# 15. Railties and Zeitwerk
+
+This distinction is very important:
+
+> **Railties manages Rails lifecycle/integration. Zeitwerk manages autoloading and eager loading.**
+
+Think:
+
+```text
+Railties
+   ↓
+"When should things be initialized?"
+
+Zeitwerk
+   ↓
+"How should Rails load these constants?"
+```
+
+Modern Rails usually has two important autoloading areas:
+
+```text
+main
+ ↓
+reloadable code
+
+once
+ ↓
+code that isn't reloaded
+```
+
+---
+
+## Development
+
+In development, reloadable constants can be removed and loaded again.
+
+```text
+User
+ ↓
+old User class removed
+ ↓
+new User class loaded
+```
+
+Therefore, don't keep old reloadable classes in long-lived global variables.
+
+---
+
+## Production
+
+Production commonly uses:
+
+```ruby
+config.eager_load = true
+```
+
+Rails loads the configured code during boot.
+
+Benefits:
+
+* problems are found earlier;
+* runtime is more predictable;
+* pre-fork servers can benefit from copy-on-write memory sharing.
+
+---
+
+## Important Railtie rule
+
+Don't capture a reloadable application class during boot and keep it forever.
+
+Bad idea:
+
+```ruby
+MY_USER_CLASS = User
+```
+
+because after reload:
+
+```text
+Old User class
+     ↓
+stored somewhere globally
+
+Rails reloads
+     ↓
+New User class
+```
+
+Now you may have two different `User` class objects.
+
+For reloadable application constants, resolve them at the appropriate lifecycle point instead.
+
+---
+
+# 16. Where PostgreSQL Fits
+
+Railties **does not talk directly to PostgreSQL**.
+
+The simplified runtime flow is:
+
+```text
+HTTP request
+    ↓
+Rails executor
+    ↓
+Active Record
+    ↓
+Connection Pool
+    ↓
+pg gem
+    ↓
+PostgreSQL
+    ↓
+Result
+    ↓
+Active Record
+    ↓
+Application
+```
+
+Railties helps configure Active Record, but it doesn't execute the SQL itself.
+
+This matters because bad Railtie code can still cause database problems.
+
+For example:
+
+```ruby
+initializer "my_gem.connect" do
+  PG.connect(...)
+end
+```
+
+is dangerous because it can create connections during boot.
+
+---
+
+# 17. Request and Reload Lifecycle
+
+In development, a simplified flow is:
+
+```text
+Code changes
+    ↓
+Rails detects change
+    ↓
+to_prepare callbacks
+    ↓
+Zeitwerk reloads code
+    ↓
+Rails executor
+    ↓
+Request
+    ↓
+Cleanup
+```
+
+The exact order of some steps can change between Rails versions.
+
+The important rules are:
+
+* don't cache reloadable classes globally;
+* make `to_prepare` code idempotent;
+* let Rails manage connection/request lifecycle.
+
+---
+
+# 18. Architecture
+
+Railties sits between Rails frameworks and the application.
+
+```text
+CLI
+ │
+ │ bin/rails
+ ↓
+Railties
+ │
+ ├── boot
+ ├── configuration
+ ├── initializers
+ ├── engines
+ ├── middleware
+ └── reload hooks
+ │
+ ├──────────────┬──────────────┐
+ ↓              ↓              ↓
+Active Record  Action Pack   Active Job
+ ↓              ↓              ↓
+Database        Rack          Queue
+ │
+ ↓
+PostgreSQL
+```
+
+Railties is therefore an **orchestration layer**.
+
+It isn't:
+
+```text
+MVC
+```
+
+and it isn't:
+
+```text
+business logic
+```
+
+---
+
+# 19. Who Is Responsible for What?
+
+### Rails/framework authors
+
+Provide:
+
+* Railties
+* lifecycle hooks
+* configuration
+* framework integration
+
+### Engine authors
+
+Provide:
+
+* reusable application functionality
+* routes
+* models/controllers/views
+* namespace isolation
+* host integration
+
+### Gem authors
+
+Should:
+
+* keep the core library Rails-independent;
+* add optional Railtie integration;
+* expose clean configuration;
+* avoid unnecessary boot work.
+
+### Application developers
+
+Should:
+
+* configure components;
+* compose engines/gems;
+* use Railties only when lifecycle integration is actually needed.
+
+---
+
+# 20. Real Production Example — Request ID Gem
+
+Imagine a gem that adds request IDs.
+
+It could provide:
 
 ```ruby
 module RequestContext
@@ -344,50 +1234,57 @@ module RequestContext
     config.request_context.header = "HTTP_X_REQUEST_ID"
 
     initializer "request_context.middleware" do |app|
-      app.middleware.insert_before Rails::Rack::Logger,
+      app.middleware.insert_before(
+        Rails::Rack::Logger,
         RequestContext::Middleware,
         header: app.config.request_context.header
+      )
     end
   end
 end
 ```
 
-Why this scales: per-request values live in request-local/fiber-aware context, not a mutable class variable. Boot only configures the stack.
+The Railtie's job is simply:
 
-### A multi-tenant model extension
+```text
+Read configuration
+      ↓
+Add middleware
+```
 
-Many SaaS applications need a concern applied to every Active Record model. Use a load hook plus explicit model opt-in; do not silently add a global default scope to all models.
+It shouldn't create request-specific state during boot.
+
+---
+
+# 21. Real Production Example — Active Record Extension
+
+Suppose a gem wants to add functionality to Active Record models.
+
+Use:
 
 ```ruby
-# lib/tenant_scoping/railtie.rb
-module TenantScoping
-  class Railtie < Rails::Railtie
-    initializer "tenant_scoping.active_record" do
-      ActiveSupport.on_load(:active_record) do
-        include TenantScoping::Model
-      end
-    end
-  end
-end
-
-# app/models/concerns/tenant_scoping/model.rb
-module TenantScoping::Model
-  extend ActiveSupport::Concern
-
-  class_methods do
-    def tenant_scoped_by(column = :account_id)
-      validates column, presence: true
-      define_method(:tenant_column) { column }
-    end
-  end
+ActiveSupport.on_load(:active_record) do
+  include TenantScoping::Model
 end
 ```
 
-Production refinement: tenant isolation must be enforced at authorization/query boundaries, and ideally PostgreSQL row-level security or carefully designed repository/query APIs where appropriate. A Railtie cannot make authorization correct by itself.
+instead of assuming Active Record is already loaded.
 
-### An engine such as a billing/admin component
+A good gem should also avoid silently changing every model's behavior unless that's explicitly intended.
 
-An engine owns routes/controllers/views and has host integration:
+For example, automatically adding:
+
+```ruby
+default_scope
+```
+
+to every model can cause serious production problems.
+
+---
+
+# 22. Real Production Example — Engine
+
+A billing engine could look like:
 
 ```ruby
 module Payments
@@ -397,529 +1294,1062 @@ module Payments
     config.generators do |g|
       g.test_framework :rspec
     end
-
-    initializer "payments.assets" do |app|
-      app.config.assets.precompile << "payments/application.css"
-    end
   end
 end
 ```
 
-The host mounts it, supplies credentials/configuration, and remains responsible for authentication and operational policy. A well-designed engine uses an explicit configuration interface rather than reaching into host constants during its class definition.
-
-### Migration/task delivery by a gem
-
-Gems that require database setup often provide an install generator to copy migrations and a rake task for verification. The Railtie’s role is discovery, not doing DDL automatically on application boot. Automatically altering production schemas during web boot is an availability and safety failure mode.
-
-### Known Rails ecosystem patterns
-
-The Rails framework components themselves are the canonical example: each implements a Railtie to add configuration and initialization only when that component is used. Libraries such as Devise, Sidekiq's Rails integration, and many observability gems use the same pattern to load tasks, add generators, attach middleware, and integrate with reloading. Read their current source rather than copying old initializer names from blog posts.
-
----
-
-## 6. Common Mistakes
-
-| Level | Mistake | Why it breaks | Better approach |
-|---|---|---|---|
-| Junior | Put application work in a class-body Railtie expression | It runs while files are required, before ordering/config is ready | Use a named initializer or an explicit runtime service. |
-| Junior | Use `to_prepare` for a one-time migration/seed | It can run repeatedly in development | Run operational actions via task/job/deploy step. |
-| Junior | Add middleware without considering position | Auth, logging, CORS, exception handling semantics change | State the required upstream/downstream dependency and test stack order. |
-| Mid | Depend on accidental gem require order | Bundler group or dependency changes silently alter boot | Use explicit `before:`/`after:` only where necessary. |
-| Mid | Store `User`/service class in a Railtie class variable | Reload replaces the constant but cache retains stale class | Resolve reloadable constants inside prepare/request paths. |
-| Mid | Subscribe to notifications on every `to_prepare` | Subscribers duplicate after reload | Subscribe once in a non-reloadable initializer or unsubscribe/guard deliberately. |
-| Mid | Connect/query database in boot to validate config | Slow/failing DB makes every process start fail; pre-fork can inherit connections | Validate syntax at boot; test connectivity in readiness checks; use lazy pool checkout. |
-| Senior | Use private Rails initializer names as an undocumented public API | Rails upgrades can break boot order | Isolate the adapter, constrain/test versions, or use a public lifecycle hook. |
-| Senior | Make a generic gem require Rails | Destroys composability and complicates CLI/test use | Keep core pure Ruby; conditionally require a Railtie integration. |
-| Senior | Turn the Railtie into global application wiring | Hidden dependencies and nondeterministic tests | Keep integration thin; inject configuration and use explicit registrations. |
-
----
-
-## 7. Performance Considerations
-
-### Boot time is a production performance budget
-
-Railties run chiefly at boot, so their primary performance cost is startup/deploy time, memory, and reloader overhead—not request CPU. In container/serverless/autoscaling systems boot latency directly affects availability and cost.
-
-- Avoid network I/O, credential discovery round-trips, large database queries, and eager `require` trees in initializer bodies.
-- Defer optional integrations until invoked, but do not defer critical configuration until the first user request if that produces a latency spike or race.
-- Use `require` for stable library code; do not use `load` to “refresh” files.
-- Eager-load production code intentionally. It catches naming problems at boot and can improve copy-on-write sharing when the master process preloads before fork.
-- Keep `to_prepare` short. In development it may run frequently and makes feedback loops slow.
-
-### Middleware cost
-
-Every middleware wraps every request. A seemingly inexpensive middleware can allocate strings, parse headers, and create spans on hot endpoints. Measure it with production-like load and inspect allocation profiles. Place expensive middleware after fast rejection/routing only if its semantics permit that; security/auth middleware often must be early.
-
-### Database connection lifecycle
-
-Do not open a PostgreSQL connection in a Railtie at require time. In pre-fork servers this can leave inherited sockets across workers. Configure pools before traffic, let Active Record manage checkout/checkin through the executor, and size pools against process/thread concurrency and database capacity. A readiness probe can validate connectivity separately from application initialization.
-
-### Trade-offs
-
-| Choice | Benefit | Cost |
-|---|---|---|
-| Eager loading | predictable runtime, early failures, CoW potential | slower boot, higher initial memory |
-| Lazy integration | lower boot work | first-use latency and more complex failure surface |
-| Global middleware | consistent behavior | pays on every endpoint/request |
-| `to_prepare` | correct development reload integration | repeated work/idempotency burden |
-| Engine | modular ownership/reuse | additional routes/paths/boot complexity |
-
----
-
-## 8. Security Considerations
-
-Railties execute code during privileged application boot. Treat them as part of your supply-chain and configuration security boundary.
-
-- **Dependencies:** review gems that introduce Railties; their initializer code runs automatically when required. Use locked versions, dependency scanning, and trusted sources.
-- **Secrets:** read credentials/env configuration through Rails configuration or a secret manager; never print secrets in `after_initialize`, generators, or diagnostic tasks.
-- **Middleware ordering:** placing custom middleware before/after `ActionDispatch` security middleware can unintentionally log credentials, bypass host authorization assumptions, or change exception handling. Redact request headers by default.
-- **Generators and rake tasks:** generated files/tasks may execute privileged actions. Avoid shell interpolation and validate paths/arguments.
-- **Engine isolation:** namespace isolation is not tenant/security isolation. Mounted engine endpoints require the same authentication, authorization, CSRF, rate limiting, and audit design as host endpoints.
-- **Configuration:** fail closed for security-sensitive options. Reject an absent signing key/issuer rather than silently disabling verification in production.
-
----
-
-## 9. Debugging
-
-### First-response checklist
-
-```bash
-# List the actual sorted initializer sequence for this app/version
-bin/rails initializers
-
-# Inspect effective middleware order
-bin/rails middleware
-
-# Confirm command/task discovery
-bin/rails --tasks | rg acme_audit
-
-# Boot in the same environment that fails
-RAILS_ENV=production bin/rails runner 'puts Rails.application.class'
-```
-
-Useful console probes:
+The host application mounts it:
 
 ```ruby
-Rails::Railtie.subclasses.map { |k| [k.name, k.load_index] }
-Rails.application.railties.all.map(&:class).map(&:name)
-Rails.application.config.middleware
-Rails.autoloaders.main.dirs
+mount Payments::Engine, at: "/payments"
 ```
 
-Some internals differ by Rails version and not every API above is public/stable. Use them diagnostically, not as permanent application coupling.
-
-### Symptom → likely cause
-
-| Symptom | Likely cause | Investigation/fix |
-|---|---|---|
-| Railtie initializer never runs | gem entrypoint did not require it, gem group not loaded | Verify `defined?(MyGem::Railtie)`, Bundler groups, and descendants. |
-| `uninitialized constant` during boot | referencing an app constant too early or incorrect Zeitwerk naming | Move reference into an appropriate hook; run `bin/rails zeitwerk:check`. |
-| Behavior duplicates after editing code | non-idempotent `to_prepare` block | Count subscribers/callbacks; guard registration or move one-time work. |
-| Middleware absent/wrong order | used the wrong target/initializer timing | `bin/rails middleware`; register during initialization and use a semantic anchor. |
-| Production-only boot failure | eager loading/config differs | run production boot locally/CI; inspect `config.eager_load`, credentials, groups. |
-| Works in console, fails in server | console hook/require path differs, stale process | reproduce with `bin/rails runner` and restart workers. |
-| “Circular dependency” at boot | initializer graph cycle | inspect custom `before`/`after`; remove one unnecessary edge. |
-
-### Instrument without making things worse
-
-Use `Rails.logger` in a temporarily targeted initializer, including the initializer name and safe configuration summary. Avoid logging secrets. For boot timing, use a profiler or instrument specific expensive blocks; do not add broad database queries just to produce logs. Debug load problems with `bundle exec ruby -e`/`require` isolation and Rails' `zeitwerk:check` task.
+The engine should provide a clear configuration interface rather than reaching directly into host application internals.
 
 ---
 
-## 10. Best Practices
+# 23. Migration and Rake Tasks
 
-1. Keep a Railtie narrowly focused on framework integration; keep business behavior in ordinary objects.
-2. Make Rails integration optional: core gem first, conditional `railtie` second.
-3. Give initializers unique names, e.g. `my_gem.configure`, not `configure`.
-4. Prefer public hooks (`config.to_prepare`, `ActiveSupport.on_load`) over internal initializer-name coupling.
-5. Make every reload callback idempotent and test it by triggering reload in development/test.
-6. Validate configuration early, but do not perform external side effects merely to validate it.
-7. Use explicit configuration objects and document defaults, supported Rails versions, and ordering assumptions.
-8. Test in a dummy Rails application across supported Rails/Ruby versions; unit tests alone cannot prove boot integration.
-9. Treat middleware placement as API: document and test the ordering.
-10. Use `bin/rails initializers`, `middleware`, and `zeitwerk:check` in upgrade/debug playbooks.
+If a gem needs database migrations, it can provide:
 
----
+* install generator
+* migration files
+* rake tasks
 
-## 11. Anti-patterns
+But don't automatically modify the production database during application boot.
 
-### Boot-time service locator
+Bad:
 
 ```ruby
-# Bad: global mutable singleton secretly coupled to Rails boot
-initializer "analytics.everything" do
-  Analytics.client = Analytics::Client.new(ENV.fetch("ANALYTICS_KEY"))
+initializer "create_tables" do
+  # run DDL
 end
 ```
 
-Why it is risky: tests leak state, configuration cannot be scoped, and reload/fork behavior is unclear. Better: expose `Analytics.configure`, freeze a configuration object after boot, and inject the client into the boundary that uses it.
+Better:
 
-### Database mutation in an initializer
+```text
+Migration
+   ↓
+Deploy
+   ↓
+Application starts
+```
+
+Database changes should be an explicit deployment operation.
+
+---
+
+# 24. Common Mistakes
+
+| Mistake                                     | Why it's bad                                    | Better approach                             |
+| ------------------------------------------- | ----------------------------------------------- | ------------------------------------------- |
+| Put business logic in a Railtie             | Runs during boot and hides application behavior | Use services/jobs/application code          |
+| Use `to_prepare` for migrations/seeds       | It may run repeatedly                           | Use migrations/tasks/deployment             |
+| Add middleware without checking position    | Changes request behavior                        | Test middleware order                       |
+| Depend on accidental gem loading order      | Can break after dependency changes              | Use explicit `before`/`after`               |
+| Cache `User` in a global/class variable     | Reload creates a new `User` class               | Resolve reloadable constants later          |
+| Subscribe on every `to_prepare`             | Subscribers can duplicate                       | Register once or carefully manage lifecycle |
+| Connect to DB during boot                   | Slows/fails every process start                 | Let Active Record manage connections        |
+| Depend heavily on private initializer names | Rails upgrades can break you                    | Prefer public hooks                         |
+| Make a generic gem require Rails            | Breaks plain Ruby usage                         | Keep Rails integration optional             |
+| Turn Railtie into global application wiring | Creates hidden dependencies                     | Keep Railtie thin                           |
+
+---
+
+# 25. Performance
+
+Railties mainly affects **boot performance**, not normal request CPU.
+
+But boot time matters in:
+
+* containers
+* autoscaling
+* serverless
+* deployments
+* pre-fork servers
+
+Avoid doing this during boot:
+
+```text
+Network requests
+Database queries
+Large file loading
+Credential API calls
+Huge eager requires
+```
+
+Keep initialization:
+
+```text
+Fast
+Deterministic
+Minimal
+```
+
+---
+
+## Middleware performance
+
+Middleware runs on every request.
+
+So even a small amount of unnecessary work becomes expensive at scale.
+
+For example:
 
 ```ruby
-# Bad
+request.headers.to_h
+```
+
+or expensive logging/tracing in every request can create significant allocations.
+
+Measure middleware using production-like traffic.
+
+---
+
+## Database connections
+
+Don't create PostgreSQL connections inside a Railtie during require/boot.
+
+Especially with pre-fork servers:
+
+```text
+Master process
+    ↓
+DB connection created
+    ↓
+fork
+ ┌──┴──┐
+Worker Worker
+```
+
+Workers may inherit unsafe connections.
+
+Let Active Record manage connections at the correct process/thread lifecycle.
+
+---
+
+# 26. Security
+
+Railties execute code during application boot, so they are part of your application's security boundary.
+
+### Gems
+
+A gem's Railtie code can run automatically when the gem is loaded.
+
+Therefore:
+
+* review dependencies;
+* lock versions;
+* scan dependencies.
+
+### Secrets
+
+Never log:
+
+```text
+API keys
+passwords
+private keys
+credentials
+```
+
+### Middleware
+
+Middleware ordering can affect:
+
+* authentication
+* CSRF
+* host authorization
+* logging
+* exception handling
+
+### Engines
+
+Remember:
+
+```ruby
+isolate_namespace
+```
+
+doesn't provide security.
+
+The engine still needs:
+
+* authentication
+* authorization
+* CSRF protection
+* rate limiting
+* auditing
+
+### Security configuration
+
+Fail closed.
+
+For example, if production requires a signing key:
+
+```ruby
+raise "signing key required"
+```
+
+is safer than silently disabling verification.
+
+---
+
+# 27. Debugging Railties
+
+These commands are extremely useful.
+
+### Initializers
+
+```bash
+bin/rails initializers
+```
+
+Shows the actual initializer order.
+
+### Middleware
+
+```bash
+bin/rails middleware
+```
+
+Shows the effective middleware stack.
+
+### Tasks
+
+```bash
+bin/rails --tasks
+```
+
+Check whether your gem's tasks are registered.
+
+### Zeitwerk
+
+```bash
+bin/rails zeitwerk:check
+```
+
+Checks autoloading/naming problems.
+
+### Production boot
+
+```bash
+RAILS_ENV=production bin/rails runner 'puts Rails.application.class'
+```
+
+Useful for reproducing production-only boot problems.
+
+---
+
+# 28. Useful Console Checks
+
+You can inspect Railties with:
+
+```ruby
+Rails::Railtie.subclasses.map { |k| [k.name, k.load_index] }
+```
+
+Check the application's Railties:
+
+```ruby
+Rails.application.railties.all.map(&:class).map(&:name)
+```
+
+Check middleware:
+
+```ruby
+Rails.application.config.middleware
+```
+
+Check Zeitwerk:
+
+```ruby
+Rails.autoloaders.main.dirs
+```
+
+These are useful for debugging, but some are internal APIs and shouldn't become permanent application dependencies.
+
+---
+
+# 29. Common Problems
+
+| Problem                                | Likely reason                                          |
+| -------------------------------------- | ------------------------------------------------------ |
+| Railtie doesn't run                    | Its file wasn't required                               |
+| `uninitialized constant` during boot   | Constant referenced too early or wrong Zeitwerk naming |
+| Behavior duplicates after reload       | `to_prepare` isn't idempotent                          |
+| Middleware order is wrong              | Wrong insertion point                                  |
+| Production fails but development works | Eager loading/configuration differs                    |
+| Console works but server fails         | Different boot/require path or stale process           |
+| Circular dependency                    | Initializer `before`/`after` cycle                     |
+
+---
+
+# 30. Best Practices
+
+Remember these rules:
+
+1. **Keep Railties focused on Rails integration.**
+2. **Keep the core of a gem Rails-independent.**
+3. **Use unique initializer names.**
+4. **Prefer public lifecycle hooks.**
+5. **Make `to_prepare` idempotent.**
+6. **Don't perform unnecessary network/database work during boot.**
+7. **Validate configuration early.**
+8. **Document Rails version compatibility.**
+9. **Test middleware order.**
+10. **Test your Railtie inside a real/dummy Rails application.**
+11. **Test production eager loading.**
+12. **Use `bin/rails initializers` when debugging boot order.**
+
+---
+
+# 31. Anti-Patterns
+
+## 1. Boot-time service locator
+
+Bad:
+
+```ruby
+initializer "analytics.everything" do
+  Analytics.client =
+    Analytics::Client.new(ENV.fetch("ANALYTICS_KEY"))
+end
+```
+
+Problems:
+
+* global mutable state;
+* difficult tests;
+* unclear reload behavior;
+* unclear fork behavior.
+
+Better:
+
+```text
+Rails configuration
+       ↓
+Immutable config
+       ↓
+Client created where needed
+```
+
+---
+
+## 2. Database mutation during boot
+
+Bad:
+
+```ruby
 initializer "create_default_roles" do
   Role.find_or_create_by!(name: "admin")
 end
 ```
 
-Every web process races during deploy, requires the database for boot, and turns deployment into an implicit migration system. Use migrations, seeds, or an idempotent release task protected by deployment coordination.
+Why?
 
-### Repeated callback registration
+Every web process can try to do it.
+
+That means:
+
+```text
+Deploy
+  ↓
+Worker 1 → database
+Worker 2 → database
+Worker 3 → database
+Worker 4 → database
+```
+
+Instead, use:
+
+* migrations
+* seeds
+* explicit release tasks
+
+---
+
+## 3. Repeated notification subscription
+
+Bad:
 
 ```ruby
-# Bad: duplicates on development reload
 config.to_prepare do
-  ActiveSupport::Notifications.subscribe("process_action.action_controller") { |*args| ... }
+  ActiveSupport::Notifications.subscribe(
+    "process_action.action_controller"
+  ) do |*args|
+    # ...
+  end
 end
 ```
 
-Subscribe once in an initializer, or retain and unsubscribe the subscription token as part of a clearly designed reload lifecycle.
+The callback may execute repeatedly.
 
-### `after_initialize` as a universal hammer
+Result:
 
-It obscures dependencies, is too late for many configuration tasks, and encourages side effects. Use named initializers for exact ordering, `to_prepare` for reloadable constants, and explicit deploy/job paths for operations.
+```text
+reload 1 → 1 subscriber
+reload 2 → 2 subscribers
+reload 3 → 3 subscribers
+```
 
----
-
-## 12. Interview Questions
-
-### Basic
-
-1. **What is a Railtie?** A Rails integration object that registers initialization/configuration/tooling hooks. It is the base class of engines and applications.
-2. **Why are Railties needed if Rails has `config/application.rb`?** They allow independently loaded framework components and gems to extend the same application boot process without central coupling.
-3. **Difference between Railtie, Engine, and Application?** Railtie supplies hooks; Engine adds application-like paths/routes; Application is the host engine and global configuration owner.
-4. **When does an initializer execute?** During application process initialization after the initializer graph is assembled, not for each request.
-5. **What does `config.to_prepare` solve?** Safe re-application of setup involving reloadable code across development reloads.
-
-### Intermediate
-
-1. **How is initializer order determined?** Rails topologically sorts named initializers using `before:`/`after:` relationships. Absent a relation, deterministic railtie load order breaks ties.
-2. **Why use `ActiveSupport.on_load(:active_record)`?** It avoids assuming Active Record is loaded and lets a library extend it at the correct time.
-3. **How would a gem add middleware?** Define a Railtie and in an initializer call the application middleware proxy with a deliberate placement anchor.
-4. **Why can a `to_prepare` callback cause duplicate behavior?** Development can run it repeatedly; repeated subscription/callback/route registration accumulates.
-5. **How do you investigate boot ordering?** `bin/rails initializers`, then source inspection for the exact Rails version and focused logging.
-
-### Senior
-
-1. **Design a Rails integration for a plain Ruby client library.** Preserve a Rails-free core; conditionally load a railtie. Provide explicit config, a small middleware/notification integration, public hooks, reload-safe behavior, tests in a dummy app, and version compatibility checks.
-2. **A deploy intermittently fails after a new initializer. What hypotheses?** Boot-time external I/O, eager-load-only constant error, migration/config rollout ordering, pre-fork inherited connection, initializer order coupling, missing production credential, or race across instances.
-3. **What is dangerous about an initializer depending on `active_record.initialize_database`?** It couples to an internal name and phase that may move across Rails releases. Prefer public API; if unavoidable, pin and integration-test it.
-4. **How do Railties interact with Zeitwerk?** Railties arrange lifecycle and paths; Zeitwerk manages constants. Railtie code must not capture reloadable constants across reload boundaries.
-
-### Staff level
-
-1. **Your company has 30 engines and 200 initializers. How do you make boot reliable?** Establish ownership/naming conventions, ban boot I/O absent a reviewed exception, define a supported extension contract, surface initializer/middleware order in CI, measure boot budgets, test production eager boot, and provide upgrade compatibility tests.
-2. **How would you migrate a monolithic `config/initializers` folder to modular integrations?** Inventory side effects/dependencies, classify by config/framework/reload/operations, move reusable boundaries to engine/gem Railties, replace hidden ordering with explicit contracts, preserve behavior behind tests, then remove coupling incrementally.
-3. **What observability would you add?** Phase timings, slow initializer logs/metrics, process boot outcome/version/config fingerprint (non-secret), middleware stack digest, connection establishment timing, and a readiness endpoint that distinguishes boot success from downstream dependency health.
-4. **How do you evaluate whether to build an engine?** Reuse and ownership boundaries, routes/assets/models/migrations required, host customization contract, upgrade cost, namespace/security needs, deployment coupling, and whether a plain gem plus Railtie is sufficient.
+Subscribe once or explicitly manage the subscription lifecycle.
 
 ---
 
-## 13. Practical Coding Examples
+## 4. Using `after_initialize` for everything
 
-### Example A: minimal, optional Rails integration
+Don't treat:
 
 ```ruby
-# lib/price_rules.rb — works in a Sidekiq script or plain Ruby
+after_initialize
+```
+
+as a universal solution.
+
+Use:
+
+```text
+Named initializer
+    ↓
+precise boot ordering
+
+on_load
+    ↓
+framework extension
+
+to_prepare
+    ↓
+reload-aware setup
+
+Migration/task/job
+    ↓
+operational work
+```
+
+---
+
+# 32. Interview Questions
+
+## Basic
+
+### What is a Railtie?
+
+A Railtie is Rails' integration mechanism.
+
+It lets a gem or framework register:
+
+* configuration
+* initializers
+* middleware
+* tasks
+* generators
+* lifecycle hooks
+
+---
+
+### Why do we need Railties?
+
+So independently developed Rails components and gems can participate in the same Rails boot process without putting everything inside `config/application.rb`.
+
+---
+
+### Railtie vs Engine vs Application?
+
+```text
+Railtie
+  → basic integration
+
+Engine
+  → reusable mini application
+
+Application
+  → main Rails application
+```
+
+---
+
+### When does an initializer run?
+
+During application boot, after Rails has built and ordered the initializer graph.
+
+Not on every request.
+
+---
+
+### What does `config.to_prepare` solve?
+
+It allows setup to run again when Rails prepares/reloads code in development.
+
+The setup must be idempotent.
+
+---
+
+# Intermediate
+
+### How is initializer order decided?
+
+Rails uses:
+
+```text
+before:
+after:
+```
+
+to create dependencies and then topologically sorts the graph using `TSort`.
+
+---
+
+### Why use `ActiveSupport.on_load`?
+
+Because the framework you're extending may not have loaded yet.
+
+It allows your gem to integrate when the framework becomes available.
+
+---
+
+### How does a gem add middleware?
+
+Create a Railtie and modify:
+
+```ruby
+app.middleware
+```
+
+inside an initializer.
+
+---
+
+### Why can `to_prepare` cause duplicate behavior?
+
+Because it can run multiple times during development.
+
+If you repeatedly:
+
+```text
+subscribe
+register
+prepend
+include
+add callback
+```
+
+without protection, behavior can accumulate.
+
+---
+
+### How do you investigate boot order?
+
+Start with:
+
+```bash
+bin/rails initializers
+```
+
+Then inspect the relevant Rails source for the exact Rails version.
+
+---
+
+# Senior
+
+### How would you design Rails integration for a plain Ruby gem?
+
+Keep the core gem independent:
+
+```text
+Plain Ruby library
+       ↓
+Optional Railtie
+```
+
+The Railtie should provide:
+
+* Rails configuration
+* framework hooks
+* middleware if needed
+* reload-safe behavior
+* tasks/generators
+* integration tests
+
+---
+
+### A deploy intermittently fails after adding an initializer. What would you investigate?
+
+Look for:
+
+* network calls during boot;
+* database calls;
+* eager-loading errors;
+* missing production credentials;
+* incorrect initializer ordering;
+* pre-fork connection creation;
+* configuration rollout problems;
+* races between processes.
+
+---
+
+### Why is this risky?
+
+```ruby
+after: "active_record.initialize_database"
+```
+
+Because this is an internal initializer name.
+
+Rails can change internal initializer names/order between versions.
+
+If you must depend on it:
+
+```text
+pin supported Rails versions
++
+integration test
+```
+
+---
+
+### How do Railties and Zeitwerk work together?
+
+Railties controls:
+
+```text
+Rails lifecycle + integration
+```
+
+Zeitwerk controls:
+
+```text
+autoloading + eager loading
+```
+
+A Railtie must be careful not to permanently capture reloadable classes.
+
+---
+
+# Staff-Level Questions
+
+### 30 engines and 200 initializers — how would you make boot reliable?
+
+Use:
+
+* naming conventions;
+* clear ownership;
+* minimal boot I/O;
+* explicit contracts;
+* initializer-order tests;
+* middleware-order tests;
+* production eager-boot tests;
+* boot-time monitoring;
+* Rails version compatibility tests.
+
+---
+
+### How would you break apart a huge `config/initializers` folder?
+
+First classify each initializer:
+
+```text
+Configuration
+Framework integration
+Reload setup
+Operational work
+Business logic
+```
+
+Then:
+
+```text
+Reusable integration
+        ↓
+Gem/Engine Railtie
+
+Business logic
+        ↓
+Service/application code
+
+Database changes
+        ↓
+Migration
+
+Operational work
+        ↓
+Task/job/deployment
+```
+
+Then replace hidden ordering with explicit dependencies.
+
+---
+
+# 33. Practical Examples
+
+## Example A — Optional Rails integration
+
+Core library:
+
+```ruby
 module PriceRules
   class Config
     attr_reader :rounding
-    def initialize(rounding: :half_up) = @rounding = rounding
-  end
 
-  class << self
-    attr_reader :config
-    def configure = yield(self)
-    def config=(value) = @config = value
+    def initialize(rounding: :half_up)
+      @rounding = rounding
+    end
   end
 end
 
 require "price_rules/railtie" if defined?(Rails::Railtie)
+```
 
-# lib/price_rules/railtie.rb
+Railtie:
+
+```ruby
 module PriceRules
   class Railtie < Rails::Railtie
     config.price_rules = ActiveSupport::OrderedOptions.new
     config.price_rules.rounding = :half_up
 
     initializer "price_rules.configure" do |app|
-      PriceRules.config = PriceRules::Config.new(
-        rounding: app.config.price_rules.rounding
-      )
+      PriceRules.config =
+        PriceRules::Config.new(
+          rounding: app.config.price_rules.rounding
+        )
     end
   end
 end
 ```
 
-The main library is usable outside Rails. The Railtie's only role is translate Rails configuration into the library's stable API.
+The important idea:
 
-### Example B: configuration validation with no I/O
+```text
+Core gem
+    ↓
+works without Rails
+
+Railtie
+    ↓
+translates Rails config into the gem's config
+```
+
+---
+
+## Example B — Configuration validation
 
 ```ruby
-module WebhookVerifier
-  class Railtie < Rails::Railtie
-    config.webhook_verifier = ActiveSupport::OrderedOptions.new
-    config.webhook_verifier.issuer = nil
-    config.webhook_verifier.public_key_pem = nil
+initializer "webhook_verifier.validate_configuration" do |app|
+  settings = app.config.webhook_verifier
 
-    initializer "webhook_verifier.validate_configuration" do |app|
-      settings = app.config.webhook_verifier
-      next unless Rails.env.production?
+  next unless Rails.env.production?
 
-      raise "webhook_verifier.issuer is required" if settings.issuer.blank?
-      raise "webhook_verifier.public_key_pem is required" if settings.public_key_pem.blank?
-    end
-  end
+  raise "issuer required" if settings.issuer.blank?
+  raise "public key required" if settings.public_key_pem.blank?
 end
 ```
 
-This fails early for invalid deployment configuration but does not call an external issuer at boot.
+This is good because it:
 
-### Example C: reload-safe decorator
+* fails early;
+* validates configuration;
+* doesn't make a network call.
+
+---
+
+## Example C — Reload-safe decorator
 
 ```ruby
-# app/decorators/order_audit_extension.rb
-module OrderAuditExtension
-  def submit!
-    super.tap { AuditEvent.record!("order_submitted", order_id: id) }
-  end
-end
-
-# config/initializers/order_audit.rb
 Rails.application.config.to_prepare do
-  Order.prepend(OrderAuditExtension) unless Order < OrderAuditExtension
+  Order.prepend(OrderAuditExtension) unless
+    Order < OrderAuditExtension
 end
 ```
 
-`Order` is reloadable. The ancestry guard prevents repeated prepends during development. In a gem, make the host constant/configurable target explicit; do not assume every host has `Order`.
+Why the check?
 
-### Example D: correct middleware test
+Because `to_prepare` can run repeatedly.
+
+---
+
+## Example D — Middleware test
 
 ```ruby
-# lib/rate_limit/railtie.rb
-initializer "rate_limit.middleware", before: "rack.runtime" do |app|
-  app.middleware.insert_before Rack::Runtime, RateLimit::Middleware
-end
+stack = Rails.application.middleware.middlewares
 
-# test/integration/middleware_test.rb
-test "rate limiter is ahead of request timing" do
-  stack = Rails.application.middleware.middlewares
-  assert_operator stack.index(RateLimit::Middleware), :<, stack.index(Rack::Runtime)
-end
+assert_operator(
+  stack.index(RateLimit::Middleware),
+  :<,
+  stack.index(Rack::Runtime)
+)
 ```
 
-Test the actual application stack, not only that the initializer was defined.
+You're testing the **actual middleware order**, not just that your initializer exists.
 
-### Example E: engine configuration boundary
+---
+
+# 34. Important Edge Cases
+
+### Railtie loaded before Rails
+
+If:
 
 ```ruby
-module SupportPortal
-  class Engine < ::Rails::Engine
-    isolate_namespace SupportPortal
-
-    config.support_portal = ActiveSupport::OrderedOptions.new
-    config.support_portal.current_account = nil
-
-    initializer "support_portal.configure" do |app|
-      resolver = app.config.support_portal.current_account
-      raise "configure support_portal.current_account" unless resolver.respond_to?(:call)
-      SupportPortal.current_account_resolver = resolver
-    end
-  end
-end
-
-# Host app config
-config.support_portal.current_account = ->(request) { Current.account }
+defined?(Rails::Railtie)
 ```
 
-The host supplies a narrow callable contract. The engine does not reach into `Account` or host authentication internals.
+is false, your conditional Railtie require won't run.
 
-### Example F: lifecycle test using a dummy app
+Make sure Rails is loaded before requiring the Rails integration.
 
-```ruby
-# spec/integration/railtie_spec.rb
-it "installs exactly one middleware" do
-  stack = Dummy::Application.middleware.middlewares
-  expect(stack.count(AcmeAudit::RequestMiddleware)).to eq(1)
-end
+---
 
-it "works after preparation runs twice" do
-  2.times { Dummy::Application.reloader.prepare! }
-  expect(AuditSubscriber.registered_count).to eq(1)
-end
+### Duplicate initializer names
+
+Avoid:
+
+```text
+configure
+configure
+configure
 ```
 
-The exact reloader test helper varies. The point is to test repeated preparation, production eager boot, and optional Rails loading as integration behavior.
+Use:
+
+```text
+my_gem.configure
+another_gem.configure
+```
 
 ---
 
-## 14. Edge Cases
+### Initializer cycle
 
-- **A Railtie file is required before `rails/railtie`:** `defined?(Rails::Railtie)` is false; the conditional integration is skipped. Ensure the gem is required after Rails or explicitly require its railtie in the app.
-- **Two initializers have the same name:** graph behavior becomes confusing and version-dependent. Names must be namespaced.
-- **A cycle exists:** Rails raises while topologically sorting. Remove artificial order; refactor shared setup into one initializer if both need each other.
-- **`to_prepare` references a removed/renamed class:** development reloading will fail later than boot. Run `zeitwerk:check` and test code reload.
-- **Forking server:** network clients/connections created before fork may be unsafe to share. Create per-worker/process resources at appropriate server lifecycle, not generic boot, or make the client fork-aware.
-- **Multiple Rails apps in one Ruby process:** avoid global singleton assumptions in a library; Railtie instances/configuration can be app-specific but global module state cannot safely represent multiple hosts.
-- **Engines with `isolate_namespace`:** routes/helpers are isolated, but host route helper lookup and model loading can still surprise you; test mounted and standalone route generation.
-- **API-only applications:** middleware and asset assumptions differ. Do not insert relative to middleware that is absent from API-only stacks.
-- **Spring/Zeus/preloaders:** process lifetime means “restart the server” may not reload a gem/railtie file. Restart the preloader when debugging boot code.
-- **Rake task boot:** many tasks load the environment; an initializer that assumes a web server/request object breaks maintenance tasks.
-- **Credentials rotation:** capture configuration values carefully. A long-lived process may need a controlled rotation/reload mechanism; boot-only configuration is not automatically dynamic.
+```text
+A after B
+B after A
+```
+
+Rails cannot sort it.
+
+Remove the unnecessary dependency or redesign the shared setup.
 
 ---
 
-## 15. Comparison Table
+### Forking servers
 
-| Concept | Main purpose | Scope | Reload-aware? | Typical use |
-|---|---|---|---|---|
-| `Rails::Railtie` | integrate a gem/framework with Rails | application boot/tooling | via explicit hooks | config, initializer, task, generator |
-| `Rails::Engine` | reusable mini-application | app + routes/paths/assets | yes, with care | mountable product domain |
-| `Rails::Application` | host application's engine | whole process | owns lifecycle | `config/application.rb` |
-| `config/initializers/*.rb` | app-local boot configuration | host app | only explicit callbacks | configure a client/framework |
-| `ActiveSupport.on_load` | extend a framework when loaded | named framework target | not primarily reload callback | Active Record/Action Controller extension |
-| `config.to_prepare` | apply setup whenever code is prepared | reload lifecycle | yes | decorators involving reloadable app constants |
-| Rack middleware | wrap HTTP requests/responses | request path | instantiated at boot | auth, tracing, compression |
-| Concern | share Ruby behavior | class/module | normal Ruby loading rules | model/controller behavior |
-| Generator | create/update project files | development/tooling | n/a | install config/migrations |
-| Rake task | explicit operational command | CLI | n/a | maintenance/backfill/verification |
+Don't create network clients/database connections too early.
+
+Resources created before `fork` may be unsafe to share between workers.
 
 ---
 
-## 16. Related Topics
+### Multiple Rails applications in one process
 
-Study these next, in this order:
-
-1. **Rails initialization process:** read `Rails::Application::Bootstrap` and `Finisher` for exact boot stages.
-2. **Zeitwerk:** autoload paths, eager loading, `autoload_once_paths`, constant naming, and reload safety.
-3. **Rails Engines:** isolated vs mountable engines, route proxy helpers, migrations, assets, and host contracts.
-4. **Rack and middleware:** Rack `call`, request/response unwinding, `ActionDispatch` default stack, thread safety.
-5. **Active Support callbacks/executor/reloader:** request wrapping, `CurrentAttributes`, query cache, connection lifecycle.
-6. **Bundler/Ruby loading:** `require`, `$LOAD_PATH`, gem entrypoints, dependency groups, and boot tooling.
-7. **Active Record connection pooling/PostgreSQL:** pool sizing, pre-fork deployment, multi-db roles/shards, migrations.
-8. **Rails upgrade strategy:** deprecations, configuration defaults, source-level compatibility tests.
-
----
-
-## 17. Summary — Revision Sheet
-
-- Railties are Rails' composition and boot subsystem; `railties` also owns much of CLI/generator infrastructure.
-- `Rails::Railtie` lets components register config, initializers, middleware, tasks, generators, and lifecycle hooks.
-- `Engine < Railtie`; `Application < Engine`.
-- Gem entrypoints must load their Railtie. Rails collects registered descendants rather than magically discovering all gems.
-- Initializers form a dependency graph sorted with `TSort`; source order is not the contract.
-- Use specific, namespaced initializer names and minimize order dependencies.
-- `ActiveSupport.on_load` extends optional framework components safely.
-- `config.to_prepare` is reload-aware and must be idempotent.
-- Railties are boot-time infrastructure, not request-time business logic and not SQL/Postgres execution.
-- Boot must be fast, deterministic, side-effect-minimal, secret-safe, and production-eager-load tested.
-- Diagnose with `bin/rails initializers`, `bin/rails middleware`, `bin/rails zeitwerk:check`, and exact-version source.
-
----
-
-## 18. Cheat Sheet (one page)
+Avoid assuming:
 
 ```ruby
-# Optional gem integration
+MyGem.global_config
+```
+
+represents every application correctly.
+
+Global module state can become problematic when multiple Rails apps exist in the same process.
+
+---
+
+### API-only Rails applications
+
+Some middleware available in a normal Rails application may not exist in an API-only application.
+
+Don't blindly write:
+
+```ruby
+insert_after SomeMiddleware
+```
+
+without checking that it exists.
+
+---
+
+### Preloaders
+
+Tools such as Spring can keep processes alive.
+
+So changing Railtie code may require restarting the preloader, not just restarting the Rails server.
+
+---
+
+# 35. Comparison Table
+
+| Concept                    | Main purpose                            |
+| -------------------------- | --------------------------------------- |
+| `Rails::Railtie`           | Integrate a gem/framework with Rails    |
+| `Rails::Engine`            | Reusable mini Rails application         |
+| `Rails::Application`       | Main application                        |
+| `config/initializers/*.rb` | Application-specific boot configuration |
+| `ActiveSupport.on_load`    | Extend a framework when it loads        |
+| `config.to_prepare`        | Reload-aware setup                      |
+| Middleware                 | Wrap HTTP requests/responses            |
+| Concern                    | Share Ruby behavior                     |
+| Generator                  | Create/update project files             |
+| Rake task                  | Explicit CLI/operational work           |
+
+---
+
+# 36. What to Study Next
+
+After Railties, study these in this order:
+
+```text
+1. Rails Initialization
+       ↓
+2. Zeitwerk
+       ↓
+3. Rails Engines
+       ↓
+4. Rack & Middleware
+       ↓
+5. Rails Executor / Reloader
+       ↓
+6. Bundler & Ruby require
+       ↓
+7. Active Record Connection Pool
+       ↓
+8. PostgreSQL
+       ↓
+9. Rails Upgrade Strategy
+```
+
+This order makes sense because each topic builds on the previous one.
+
+---
+
+# 37. Revision Sheet
+
+Remember these points:
+
+* **Railties = Rails integration + boot orchestration.**
+* `Rails::Railtie` is the base integration class.
+* `Engine < Railtie`.
+* `Application < Engine`.
+* A gem must **require its Railtie** for Rails to know about it.
+* Initializers run during **boot**, not every request.
+* Initializers form a **dependency graph**.
+* `before:` and `after:` control ordering.
+* Rails uses **TSort** to sort them.
+* Use unique initializer names.
+* `ActiveSupport.on_load` is useful for extending frameworks safely.
+* `config.to_prepare` is for **reload-aware setup**.
+* `to_prepare` code must be **idempotent**.
+* Railties don't execute SQL.
+* Railties configure Active Record; Active Record communicates with PostgreSQL.
+* Don't perform unnecessary DB/network work during boot.
+* Don't cache reloadable classes globally.
+* Middleware order matters.
+* `isolate_namespace` is not a security boundary.
+* Prefer public hooks over private Rails initializer names.
+* Use:
+
+```bash
+bin/rails initializers
+bin/rails middleware
+bin/rails zeitwerk:check
+```
+
+when debugging.
+
+---
+
+# 38. One-Page Cheat Sheet
+
+```ruby
+# Gem entrypoint
 require "my_gem/railtie" if defined?(Rails::Railtie)
 
 module MyGem
   class Railtie < Rails::Railtie
-    # Defaults exposed to host app
+
+    # Configuration
     config.my_gem = ActiveSupport::OrderedOptions.new
     config.my_gem.enabled = true
 
-    # Boot graph node; unique name; app is supplied
-    initializer "my_gem.configure", after: "some.prerequisite" do |app|
-      MyGem.configure(enabled: app.config.my_gem.enabled)
+    # Initializer
+    initializer "my_gem.configure" do |app|
+      MyGem.configure(
+        enabled: app.config.my_gem.enabled
+      )
     end
 
-    # Middleware: request down, response up
+    # Middleware
     initializer "my_gem.middleware" do |app|
-      app.middleware.insert_after Rack::Head, MyGem::Middleware
+      app.middleware.insert_after Rack::Head,
+        MyGem::Middleware
     end
 
-    # Framework extension only when it is loaded
+    # Framework extension
     initializer "my_gem.active_record" do
-      ActiveSupport.on_load(:active_record) { include MyGem::Model }
+      ActiveSupport.on_load(:active_record) do
+        include MyGem::Model
+      end
     end
 
-    # Reload-aware: must run correctly N times
+    # Reload-safe setup
     config.to_prepare do
-      Widget.include(MyGem::WidgetExtension) unless Widget < MyGem::WidgetExtension
+      Widget.include(MyGem::WidgetExtension) unless
+        Widget < MyGem::WidgetExtension
     end
 
-    rake_tasks { load File.expand_path("../tasks/my_gem.rake", __dir__) }
-    generators { require "generators/my_gem/install/install_generator" }
+    # Tasks
+    rake_tasks do
+      load File.expand_path("../tasks/my_gem.rake", __dir__)
+    end
+
   end
 end
 ```
 
+Useful commands:
+
 ```bash
-bin/rails initializers     # sorted boot graph
-bin/rails middleware       # effective Rack stack
-bin/rails zeitwerk:check   # autoload naming/layout
+bin/rails initializers
+bin/rails middleware
+bin/rails zeitwerk:check
+
 RAILS_ENV=production bin/rails runner 'puts :booted'
 ```
 
-**Never:** make network/DDL side effects at boot, capture reloadable app classes globally, assume middleware exists in every app mode, or rely on accidental initializer/gem order.
+### Never do this casually
 
----
+```text
+❌ Network calls during boot
+❌ Database mutations during boot
+❌ Capture reloadable classes globally
+❌ Assume middleware exists everywhere
+❌ Depend on accidental gem load order
+❌ Make every gem require Rails
+❌ Put business logic inside Railties
+```
 
-## 19. Practice Exercises
+### Remember this mental model
 
-### Easy
+```text
+                 Rails Application
+                        │
+                        ↓
+                    Railties
+          ┌─────────────┼─────────────┐
+          ↓             ↓             ↓
+     Configuration  Initializers   Middleware
+          │             │             │
+          └─────────────┼─────────────┘
+                        ↓
+                  Rails Frameworks
+             ┌──────────┼──────────┐
+             ↓          ↓          ↓
+        ActiveRecord  Controller  ActiveJob
+             │
+             ↓
+         PostgreSQL
+```
 
-1. Create a gem-like `CurrencyFormatting` module with optional Railtie integration. Add `config.currency_formatting.default_currency`, then map it into a plain Ruby configuration object.
-2. Add an initializer named `currency_formatting.configure` and verify it appears in `bin/rails initializers`.
-3. Add a rake task through `rake_tasks`; confirm it is visible under `bin/rails --tasks` without running business work at require time.
+**In one sentence:**
 
-### Medium
-
-4. Build a request-ID middleware Railtie. Insert it before logging, add a response header, and write a request test plus a middleware-order test.
-5. Add an `ActiveSupport.on_load(:active_record)` extension that provides an explicit `audited!` model macro. Test an app that does and does not load Active Record.
-6. Make a decorator installed by `to_prepare`; prove it is idempotent by running preparation twice in an integration test.
-7. Deliberately introduce an initializer cycle, observe the failure, then replace the two-way dependency with a single configuration boundary.
-
-### Hard
-
-8. Build an isolated mountable engine with routes, a host-provided authentication callable, and an install generator. Test mounting it at two different paths.
-9. Profile a slow boot caused by an initializer that loads data. Replace it with cached/lazy/runtime behavior and explain the availability trade-off.
-10. Design a production-safe third-party API client integration: configuration validation, no boot network call, request instrumentation, fork-safe client creation, timeouts, and redacted logging.
-11. Create a compatibility test matrix for Rails 7.1, 7.2, 8.0, and 8.1. Identify every place your integration relies on private initializer names and remove or explicitly constrain it.
-
-### Self-review rubric
-
-For each solution, be able to answer: What requires this file? When does this code run? What runs before/after it and why? Is it run more than once? What happens in production eager-load and a pre-fork server? Does it affect every request? How is it tested?
-
----
-
-## 20. Additional Resources
-
-### Official documentation and source
-
-- [Rails::Railtie API](https://api.rubyonrails.org/classes/Rails/Railtie.html) — API overview, DSL methods, and linked source.
-- [Rails API: Railties overview](https://api.rubyonrails.org/classes/Rails.html) — the gem’s stated responsibilities: boot, CLI, and generators.
-- [Rails Engines guide](https://guides.rubyonrails.org/engines.html) — engine structure, isolation, and integration.
-- [Rails configuration guide](https://guides.rubyonrails.org/configuring.html) — application configuration and initialization settings.
-- [Autoloading and Reloading Constants guide](https://guides.rubyonrails.org/autoloading_and_reloading_constants.html) — Zeitwerk, eager loading, and reloading rules.
-- [Rails source: `railties/`](https://github.com/rails/rails/tree/main/railties) — begin with `lib/rails/railtie.rb`, `initializable.rb`, `application.rb`, `application/bootstrap.rb`, `application/finisher.rb`, `engine.rb`, and `engine/railties.rb`.
-- [Rails source: Active Record Railtie](https://github.com/rails/rails/blob/main/activerecord/lib/active_record/railtie.rb) — concrete framework integration example.
-- [Rails Guides](https://guides.rubyonrails.org/) and [API docs](https://api.rubyonrails.org/) — always select the version matching your application.
-
-### Books and talks
-
-- *Crafting Rails Applications* by José Valim — engines and advanced Rails composition (some API examples predate modern Zeitwerk; translate concepts, not code verbatim).
-- *The Rails 5 Way* by Obie Fernandez — useful architecture context; verify version-specific APIs.
-- RailsConf/RubyKaigi talks by Rails core maintainers on Zeitwerk, engines, and framework internals. Prefer recordings with source links and check their Rails version before applying advice.
-
-### Deliberate source-reading route
-
-Read `railties/lib/rails/railtie.rb`, then `railties/lib/rails/initializable.rb`. Next trace `Rails::Application` through bootstrap and finisher initializers, and finally compare one framework railtie (Active Record) with one engine. Keep `bin/rails initializers` open beside the source; that pairing turns a vague boot story into a concrete graph.
-
----
-
-## Interview closing answer (60 seconds)
-
-“Railties are the integration layer that makes Rails modular. Every framework component can register configuration and initialization work through `Rails::Railtie`; engines build on that, and the application is the top-level engine. At boot Rails collects those initializers and topologically sorts their `before`/`after` dependencies, then builds things like the middleware stack and reloader integration. In a gem I keep the core Rails-independent and add a conditional Railtie only for Rails-specific hooks. I use `on_load` for framework extensions, `to_prepare` only for idempotent reload-safe setup, and avoid network or database side effects at boot. When debugging, I inspect the real initializer and middleware stacks for the exact Rails version.”
+> **Railties is the system Rails uses to let frameworks, gems, engines, and the application register configuration and boot-time behavior and then combine all of it into one working Rails application.**
